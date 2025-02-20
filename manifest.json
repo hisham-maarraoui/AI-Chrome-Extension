@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "AI Autocomplete",
+  "version": "1.0",
+  "description": "Provides AI-powered autocomplete suggestions for text fields",
+  "permissions": [
+    "activeTab",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://openrouter.ai/*"
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'",
+    "sandbox": "sandbox allow-scripts"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"]
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["test.html"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+} 
