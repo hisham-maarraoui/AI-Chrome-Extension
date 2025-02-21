@@ -1,0 +1,13 @@
+.input-wrapper {
+    position: relative;
+    display: inline-block;
+}
+
+.suggestion-span {
+    position: fixed;
+    pointer-events: none;
+}
+
+input, textarea {
+    background: transparent !important;
+} 

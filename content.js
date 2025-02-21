@@ -1,6 +1,8 @@
 // Configuration
-const OPENROUTER_API_KEY = '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';
 const DEBOUNCE_MS = 300; // Delay before making API calls
+
+// Use the API key from config
+const OPENROUTER_API_KEY = config.OPENROUTER_API_KEY;
 
 // Create suggestion overlay element
 const overlay = document.createElement('div');
@@ -17,76 +19,146 @@ overlay.style.cssText = `
   border-radius: 4px;
   pointer-events: none;
 `;
-document.body.appendChild(overlay);
 
-// Track current active input
-let activeInput = null;
-let currentSuggestion = null;
-let debounceTimeout = null;
-let lastInputText = ''; // Track the last input text
+// Wait for DOM to be ready before appending overlay
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initializeExtension);
+} else {
+    initializeExtension();
+}
 
-// Add event listeners to all text inputs
-document.addEventListener('focusin', (e) => {
-    if (e.target.matches('input[type="text"], textarea')) {
-        activeInput = e.target;
+function initializeExtension() {
+    let activeInput = null;
+    let currentSuggestion = null;
+    let debounceTimeout = null;
+    let lastInputText = '';
+
+    const INPUT_SELECTOR = 'input[type="text"], input[type="search"], input:not([type]), textarea';
+
+    function showSuggestion(suggestion, input) {
+        if (!suggestion || !input) return;
+
+        // Remove any existing suggestion elements
+        const existingSuggestion = document.querySelector('.suggestion-span');
+        if (existingSuggestion) {
+            existingSuggestion.remove();
+        }
+
+        // Get the computed styles and position of the input
+        const computedStyle = window.getComputedStyle(input);
+        const rect = input.getBoundingClientRect();
+        
+        // Calculate the width of the current input text
+        const textWidth = getTextWidth(input.value, computedStyle.font);
+
+        // Create the suggestion span
+        const suggestionSpan = document.createElement('span');
+        suggestionSpan.className = 'suggestion-span';
+        suggestionSpan.style.cssText = `
+            position: fixed;
+            left: ${rect.left + textWidth + parseFloat(computedStyle.paddingLeft)}px;
+            top: ${rect.top + parseFloat(computedStyle.paddingTop)}px;
+            font-family: ${computedStyle.fontFamily};
+            font-size: ${computedStyle.fontSize};
+            line-height: ${computedStyle.lineHeight};
+            color: #666;
+            pointer-events: none;
+            white-space: pre;
+            z-index: 999999;
+        `;
+        
+        // Add a space before the suggestion if there isn't one
+        const needsSpace = !input.value.endsWith(' ') && input.value.length > 0;
+        suggestionSpan.textContent = needsSpace ? ' ' + suggestion : suggestion;
+
+        // Add the suggestion span directly to body
+        document.body.appendChild(suggestionSpan);
     }
-});
 
-document.addEventListener('focusout', (e) => {
-    overlay.style.display = 'none';
-    activeInput = null;
-    currentSuggestion = null;
-});
+    document.addEventListener('focusin', (e) => {
+        const input = e.target;
+        if (input.matches(INPUT_SELECTOR) && !input.readOnly && !input.disabled) {
+            activeInput = input;
+        }
+    });
 
-document.addEventListener('input', (e) => {
-    if (!activeInput) {
-        console.log('No active input');
-        return;
-    }
+    document.addEventListener('focusout', (e) => {
+        if (activeInput) {
+            const suggestionSpan = document.querySelector('.suggestion-span');
+            if (suggestionSpan) {
+                suggestionSpan.remove();
+            }
+            activeInput = null;
+            currentSuggestion = null;
+        }
+    });
 
-    console.log('Input event triggered:', activeInput.value);
-
-    // Clear previous timeout
-    if (debounceTimeout) {
-        clearTimeout(debounceTimeout);
-    }
-
-    // Set new timeout to avoid too many API calls
-    debounceTimeout = setTimeout(async () => {
-        const text = activeInput.value;
-        lastInputText = text; // Store the current input text
-        console.log('Debounced input value:', text);
-        if (text.length < 2) {
-            overlay.style.display = 'none';
+    document.addEventListener('input', (e) => {
+        if (!activeInput) {
+            console.log('No active input');
             return;
         }
 
-        try {
-            const suggestion = await getAISuggestion(text);
-            // Only show suggestion if the input hasn't changed
-            if (suggestion && lastInputText === activeInput.value) {
-                currentSuggestion = suggestion;
-                showSuggestion(suggestion, activeInput);
-            } else {
-                overlay.style.display = 'none';
-                currentSuggestion = null;
-            }
-        } catch (error) {
-            console.error('Error getting suggestion:', error);
-            overlay.style.display = 'none';
-        }
-    }, DEBOUNCE_MS);
-});
+        console.log('Input event triggered:', activeInput.value);
 
-document.addEventListener('keydown', (e) => {
-    if (e.key === 'Tab' && currentSuggestion) {
-        e.preventDefault();
-        // Combine the current input with the suggestion
-        activeInput.value = `${activeInput.value} ${currentSuggestion}`;
-        overlay.style.display = 'none';
-        currentSuggestion = null;
-    }
-});
+        // Clear previous timeout
+        if (debounceTimeout) {
+            clearTimeout(debounceTimeout);
+        }
+
+        // Set new timeout to avoid too many API calls
+        debounceTimeout = setTimeout(async () => {
+            const text = activeInput.value;
+            lastInputText = text; // Store the current input text
+            console.log('Debounced input value:', text);
+            if (text.length < 2) {
+                return;
+            }
+
+            try {
+                const suggestion = await getAISuggestion(text);
+                // Only show suggestion if the input hasn't changed
+                if (suggestion && lastInputText === activeInput.value) {
+                    currentSuggestion = suggestion;
+                    showSuggestion(suggestion, activeInput);
+                }
+            } catch (error) {
+                console.error('Error getting suggestion:', error);
+            }
+        }, DEBOUNCE_MS);
+    });
+
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Tab' && currentSuggestion && activeInput) {
+            e.preventDefault();
+            
+            // Remove the suggestion span
+            const suggestionSpan = document.querySelector('.suggestion-span');
+            if (suggestionSpan) {
+                suggestionSpan.remove();
+            }
+
+            // Add a space if needed
+            const needsSpace = !activeInput.value.endsWith(' ') && activeInput.value.length > 0;
+            
+            // Update the input value
+            activeInput.value = activeInput.value + (needsSpace ? ' ' : '') + currentSuggestion;
+            
+            // Clear the current suggestion
+            currentSuggestion = null;
+        }
+    });
+
+    document.addEventListener('visibilitychange', () => {
+        if (activeInput) {
+            const suggestionSpan = document.querySelector('.suggestion-span');
+            if (suggestionSpan) {
+                suggestionSpan.remove();
+            }
+            currentSuggestion = null;
+        }
+    });
+}
 
 async function getAISuggestion(text) {
     try {
@@ -102,7 +174,8 @@ async function getAISuggestion(text) {
                 'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
                 'Content-Type': 'application/json',
                 'Origin': 'https://openrouter.ai',
-                'Referer': 'https://openrouter.ai/'
+                'Referer': 'https://openrouter.ai/',
+                'HTTP-Referer': 'https://openrouter.ai/'
             },
             body: JSON.stringify({
                 model: 'anthropic/claude-3-haiku',
@@ -126,6 +199,9 @@ async function getAISuggestion(text) {
         if (!response.ok) {
             const errorData = await response.json().catch(() => ({}));
             console.error('API Response not OK:', response.status, errorData);
+            if (response.status === 401) {
+                console.error('Authentication failed. Please check your API key.');
+            }
             throw new Error(`API request failed: ${response.status} ${JSON.stringify(errorData)}`);
         }
 
@@ -155,19 +231,10 @@ async function getAISuggestion(text) {
     }
 }
 
-function showSuggestion(suggestion, input) {
-    console.log('Showing suggestion:', suggestion);
-    const rect = input.getBoundingClientRect();
-    const top = rect.bottom + window.scrollY;
-    const left = rect.left + window.scrollX;
-
-    // Show the full text (current input + suggestion)
-    const fullText = `${input.value} ${suggestion}`;
-    overlay.textContent = fullText;
-    overlay.style.top = `${top}px`;
-    overlay.style.left = `${left}px`;
-    overlay.style.display = 'block';
-
-    console.log('Overlay position:', { top, left });
-    console.log('Overlay visible:', overlay.style.display);
+// Helper function to calculate text width
+function getTextWidth(text, font) {
+    const canvas = getTextWidth.canvas || (getTextWidth.canvas = document.createElement('canvas'));
+    const context = canvas.getContext('2d');
+    context.font = font;
+    return context.measureText(text).width;
 } 
