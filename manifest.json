@@ -18,7 +18,7 @@
     {
       "matches": ["<all_urls>"],
       "css": ["styles.css"],
-      "js": ["config.js", "content.js"]
+      "js": ["content.js"]
     }
   ],
   "web_accessible_resources": [
@@ -26,5 +26,6 @@
       "resources": ["test.html"],
       "matches": ["<all_urls>"]
     }
-  ]
+  ],
+  "options_page": "options.html"
 } 

@@ -12,4 +12,4 @@
 1. Visit [OpenRouter](https://openrouter.ai/keys)
 2. Create an account and generate an API key
 3. Copy the key to your `config.js` file
-# AI-Chrome-Extension
+

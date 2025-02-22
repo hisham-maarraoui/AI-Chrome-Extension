@@ -1,8 +1,36 @@
 // Configuration
-const DEBOUNCE_MS = 300; // Delay before making API calls
+const DEBOUNCE_MS = 50; // Delay before making API calls
 
-// Use the API key from config
-const OPENROUTER_API_KEY = config.OPENROUTER_API_KEY;
+let OPENROUTER_API_KEY = null;
+let GROQ_API_KEY = null;
+let API_PROVIDER = 'openrouter';
+let OPENROUTER_MODEL = 'deepseek/deepseek-r1:free';
+let GROQ_MODEL = 'mixtral-8x7b-32768';
+
+// Get API keys and settings from storage
+chrome.storage.sync.get([
+    'apiProvider',
+    'openrouterKey',
+    'groqKey',
+    'openrouterModel',
+    'groqModel'
+], (result) => {
+    if (result.apiProvider) {
+        API_PROVIDER = result.apiProvider;
+    }
+    if (result.openrouterKey) {
+        OPENROUTER_API_KEY = result.openrouterKey;
+    }
+    if (result.groqKey) {
+        GROQ_API_KEY = result.groqKey;
+    }
+    if (result.openrouterModel) {
+        OPENROUTER_MODEL = result.openrouterModel;
+    }
+    if (result.groqModel) {
+        GROQ_MODEL = result.groqModel;
+    }
+});
 
 // Create suggestion overlay element
 const overlay = document.createElement('div');
@@ -20,6 +48,28 @@ overlay.style.cssText = `
   pointer-events: none;
 `;
 
+// Add loading indicator styles
+const loadingStyles = `
+    @keyframes pulse {
+        0% { opacity: 0.4; }
+        50% { opacity: 0.8; }
+        100% { opacity: 0.4; }
+    }
+    .suggestion-loading {
+        position: fixed;
+        color: #666;
+        pointer-events: none;
+        white-space: pre;
+        z-index: 999999;
+        animation: pulse 1.5s infinite;
+    }
+`;
+
+// Add style element to document
+const styleElement = document.createElement('style');
+styleElement.textContent = loadingStyles;
+document.head.appendChild(styleElement);
+
 // Wait for DOM to be ready before appending overlay
 if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', initializeExtension);
@@ -27,62 +77,142 @@ if (document.readyState === 'loading') {
     initializeExtension();
 }
 
+// Add this function at the top level, before initializeExtension()
+function getValue(el) {
+    if (window.location.hostname === 'docs.google.com') {
+        const editor = document.querySelector('.docs-texteventtarget-iframe');
+        if (editor) {
+            try {
+                const text = editor.contentDocument.body.innerText;
+                // Get the last paragraph or current line
+                const lines = text.split('\n');
+                return lines[lines.length - 1] || '';
+            } catch (e) {
+                console.error('Failed to get Google Docs text:', e);
+                return '';
+            }
+        }
+    }
+
+    if (el.isContentEditable) {
+        return el.textContent;
+    }
+    return el.value || '';
+}
+
+// Add this function as well
+function setValue(el, value) {
+    if (window.location.hostname === 'docs.google.com') {
+        const editor = document.querySelector('.docs-texteventtarget-iframe');
+        if (editor) {
+            try {
+                // Simulate typing in Google Docs
+                value.split('').forEach(char => {
+                    const event = new KeyboardEvent('keypress', {
+                        key: char,
+                        code: 'Key' + char.toUpperCase(),
+                        bubbles: true
+                    });
+                    editor.contentDocument.body.dispatchEvent(event);
+                });
+            } catch (e) {
+                console.error('Failed to set Google Docs text:', e);
+            }
+        }
+        return;
+    }
+
+    if (el.isContentEditable) {
+        el.textContent = value;
+    } else {
+        el.value = value;
+    }
+}
+
 function initializeExtension() {
     let activeInput = null;
     let currentSuggestion = null;
     let debounceTimeout = null;
     let lastInputText = '';
+    let lastRequestController = null; // Track the latest request
 
-    const INPUT_SELECTOR = 'input[type="text"], input[type="search"], input:not([type]), textarea';
+    // Update selector to include contenteditable elements and specific Gmail/Google Docs selectors
+    const INPUT_SELECTOR = `
+        input[type="text"], 
+        input[type="search"], 
+        input:not([type]), 
+        textarea, 
+        [contenteditable="true"],
+        .editable,
+        .docs-texteventtarget-iframe,
+        .kix-lineview,
+        .docs-texteventtarget-iframe body
+    `.trim();
 
-    function showSuggestion(suggestion, input) {
-        if (!suggestion || !input) return;
+    // Add mutation observer to handle dynamically added editors
+    const observer = new MutationObserver((mutations) => {
+        for (const mutation of mutations) {
+            for (const node of mutation.addedNodes) {
+                if (node.nodeType === 1) { // Element node
+                    const inputs = node.matches(INPUT_SELECTOR) ?
+                        [node] :
+                        node.querySelectorAll(INPUT_SELECTOR);
 
-        // Remove any existing suggestion elements
-        const existingSuggestion = document.querySelector('.suggestion-span');
-        if (existingSuggestion) {
-            existingSuggestion.remove();
+                    for (const input of inputs) {
+                        setupInput(input);
+                    }
+                }
+            }
+        }
+    });
+
+    observer.observe(document.body, {
+        childList: true,
+        subtree: true
+    });
+
+    // Setup handlers for an input element
+    function setupInput(input) {
+        // Skip if already setup
+        if (input.dataset.autocompleteSetup) return;
+        input.dataset.autocompleteSetup = 'true';
+
+        // Special handling for Google Docs
+        if (window.location.hostname === 'docs.google.com') {
+            const editor = document.querySelector('.docs-texteventtarget-iframe');
+            if (editor) {
+                try {
+                    const iframeDoc = editor.contentDocument || editor.contentWindow.document;
+                    iframeDoc.body.addEventListener('focusin', handleFocusIn);
+                    iframeDoc.body.addEventListener('focusout', handleFocusOut);
+                    iframeDoc.body.addEventListener('input', handleInput);
+                    iframeDoc.body.addEventListener('keydown', handleKeyDown);
+                } catch (e) {
+                    console.error('Failed to attach to Google Docs iframe:', e);
+                }
+            }
+            return;
         }
 
-        // Get the computed styles and position of the input
-        const computedStyle = window.getComputedStyle(input);
-        const rect = input.getBoundingClientRect();
-        
-        // Calculate the width of the current input text
-        const textWidth = getTextWidth(input.value, computedStyle.font);
-
-        // Create the suggestion span
-        const suggestionSpan = document.createElement('span');
-        suggestionSpan.className = 'suggestion-span';
-        suggestionSpan.style.cssText = `
-            position: fixed;
-            left: ${rect.left + textWidth + parseFloat(computedStyle.paddingLeft)}px;
-            top: ${rect.top + parseFloat(computedStyle.paddingTop)}px;
-            font-family: ${computedStyle.fontFamily};
-            font-size: ${computedStyle.fontSize};
-            line-height: ${computedStyle.lineHeight};
-            color: #666;
-            pointer-events: none;
-            white-space: pre;
-            z-index: 999999;
-        `;
-        
-        // Add a space before the suggestion if there isn't one
-        const needsSpace = !input.value.endsWith(' ') && input.value.length > 0;
-        suggestionSpan.textContent = needsSpace ? ' ' + suggestion : suggestion;
-
-        // Add the suggestion span directly to body
-        document.body.appendChild(suggestionSpan);
+        // Regular input handling
+        input.addEventListener('focusin', handleFocusIn);
+        input.addEventListener('focusout', handleFocusOut);
+        input.addEventListener('input', handleInput);
+        input.addEventListener('keydown', handleKeyDown);
     }
 
-    document.addEventListener('focusin', (e) => {
+    // Setup existing inputs
+    document.querySelectorAll(INPUT_SELECTOR).forEach(setupInput);
+
+    // Update event handlers to work with contenteditable
+    function handleFocusIn(e) {
         const input = e.target;
         if (input.matches(INPUT_SELECTOR) && !input.readOnly && !input.disabled) {
             activeInput = input;
         }
-    });
+    }
 
-    document.addEventListener('focusout', (e) => {
+    function handleFocusOut(e) {
         if (activeInput) {
             const suggestionSpan = document.querySelector('.suggestion-span');
             if (suggestionSpan) {
@@ -91,63 +221,106 @@ function initializeExtension() {
             activeInput = null;
             currentSuggestion = null;
         }
-    });
+    }
 
-    document.addEventListener('input', (e) => {
-        if (!activeInput) {
-            console.log('No active input');
-            return;
+    // Update input handler for contenteditable
+    function handleInput(e) {
+        if (!activeInput) return;
+
+        // Clear existing suggestion and loading indicator
+        const suggestionSpan = document.querySelector('.suggestion-span');
+        const loadingSpan = document.querySelector('.suggestion-loading');
+        if (suggestionSpan) suggestionSpan.remove();
+        if (loadingSpan) loadingSpan.remove();
+        currentSuggestion = null;
+
+        // Cancel any pending request
+        if (lastRequestController) {
+            lastRequestController.abort();
         }
-
-        console.log('Input event triggered:', activeInput.value);
 
         // Clear previous timeout
         if (debounceTimeout) {
             clearTimeout(debounceTimeout);
         }
 
-        // Set new timeout to avoid too many API calls
         debounceTimeout = setTimeout(async () => {
-            const text = activeInput.value;
-            lastInputText = text; // Store the current input text
-            console.log('Debounced input value:', text);
-            if (text.length < 2) {
-                return;
-            }
+            const text = getValue(activeInput);
+            lastInputText = text;
+
+            if (text.length < 2) return;
 
             try {
-                const suggestion = await getAISuggestion(text);
-                // Only show suggestion if the input hasn't changed
-                if (suggestion && lastInputText === activeInput.value) {
+                // Show loading indicator
+                showLoadingIndicator(activeInput);
+
+                // Create new controller for this request
+                lastRequestController = new AbortController();
+
+                const suggestion = await getAISuggestion(text, lastRequestController.signal);
+
+                // Remove loading indicator
+                const loadingSpan = document.querySelector('.suggestion-loading');
+                if (loadingSpan) loadingSpan.remove();
+
+                // Only show suggestion if the input hasn't changed and we still have focus
+                if (suggestion &&
+                    lastInputText === text &&
+                    document.activeElement === activeInput) {
                     currentSuggestion = suggestion;
                     showSuggestion(suggestion, activeInput);
                 }
             } catch (error) {
-                console.error('Error getting suggestion:', error);
+                // Remove loading indicator on error
+                const loadingSpan = document.querySelector('.suggestion-loading');
+                if (loadingSpan) loadingSpan.remove();
+
+                if (error.name !== 'AbortError') {
+                    console.error('Error getting suggestion:', error);
+                }
             }
         }, DEBOUNCE_MS);
-    });
+    }
 
-    document.addEventListener('keydown', (e) => {
+    // Add this function after handleInput
+    function handleKeyDown(e) {
+        if (e.key === 'Backspace' && activeInput) {
+            // Immediately clear suggestion on backspace
+            const suggestionSpan = document.querySelector('.suggestion-span');
+            if (suggestionSpan) {
+                suggestionSpan.remove();
+                currentSuggestion = null;
+            }
+        }
+
         if (e.key === 'Tab' && currentSuggestion && activeInput) {
             e.preventDefault();
-            
-            // Remove the suggestion span
+
             const suggestionSpan = document.querySelector('.suggestion-span');
             if (suggestionSpan) {
                 suggestionSpan.remove();
             }
 
-            // Add a space if needed
-            const needsSpace = !activeInput.value.endsWith(' ') && activeInput.value.length > 0;
-            
-            // Update the input value
-            activeInput.value = activeInput.value + (needsSpace ? ' ' : '') + currentSuggestion;
-            
-            // Clear the current suggestion
+            // Get text content appropriately based on input type
+            const inputText = getValue(activeInput);
+            const lastWord = inputText.split(/[\s.!?]+/).pop() || '';
+
+            const isCompletion = currentSuggestion.toLowerCase().startsWith(lastWord.toLowerCase()) &&
+                currentSuggestion.toLowerCase() !== lastWord.toLowerCase();
+
+            let displayText = isCompletion ? currentSuggestion.slice(lastWord.length) : currentSuggestion;
+            const needsSpace = !isCompletion && !inputText.endsWith(' ') && inputText.length > 0;
+
+            setValue(activeInput, inputText + (needsSpace ? ' ' : '') + displayText);
             currentSuggestion = null;
         }
-    });
+    }
+
+    // Update event listeners to use new handlers
+    document.addEventListener('focusin', handleFocusIn);
+    document.addEventListener('focusout', handleFocusOut);
+    document.addEventListener('input', handleInput);
+    document.addEventListener('keydown', handleKeyDown);
 
     document.addEventListener('visibilitychange', () => {
         if (activeInput) {
@@ -160,33 +333,91 @@ function initializeExtension() {
     });
 }
 
-async function getAISuggestion(text) {
+async function getAISuggestion(text, signal) {
     try {
+        if (!text) {
+            console.log('Empty text, skipping suggestion');
+            return null;
+        }
+
+        const activeKey = API_PROVIDER === 'openrouter' ? OPENROUTER_API_KEY : GROQ_API_KEY;
+        if (!activeKey) {
+            console.error('No API key set. Please configure in extension settings.');
+            return null;
+        }
+
         console.log('Making API request for text:', text);
 
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 10000);
+        const endpoint = API_PROVIDER === 'openrouter'
+            ? 'https://openrouter.ai/api/v1/chat/completions'
+            : 'https://api.groq.com/openai/v1/chat/completions';
 
-        const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-            method: 'POST',
-            signal: controller.signal,
-            headers: {
-                'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+        const headers = API_PROVIDER === 'openrouter'
+            ? {
+                'Authorization': `Bearer ${activeKey}`,
                 'Content-Type': 'application/json',
                 'Origin': 'https://openrouter.ai',
                 'Referer': 'https://openrouter.ai/',
                 'HTTP-Referer': 'https://openrouter.ai/'
-            },
+            }
+            : {
+                'Authorization': `Bearer ${activeKey}`,
+                'Content-Type': 'application/json'
+            };
+
+        const model = API_PROVIDER === 'openrouter' ? OPENROUTER_MODEL : GROQ_MODEL;
+
+        const systemPrompt = API_PROVIDER === 'openrouter' ?
+            `You are an autocomplete assistant. Follow these rules strictly:
+1. If input ends with a partial word, complete that word naturally in the context
+2. If input ends with a complete word or space, suggest the next 1-3 words that make sense in context
+3. Never repeat words that are already in the input
+4. Only provide the raw completion/suggestion - no labels or explanations
+5. Keep suggestions concise and natural
+6. Never output more than 3 words
+7. Suggestions must make grammatical sense in the context
+8. For partial words, complete them based on the full context, not just the last word
+
+Examples:
+Input: "I need to fi" → find
+Input: "I need to" → get started with
+Input: "The weather is" → very nice today
+Input: "google translate is a search engine that" → helps users translate
+Input: "google is a company that" → provides search services` :
+            // Stricter prompt for Groq
+            `You are an autocomplete assistant. Return ONLY contextually appropriate completions.
+
+Rules:
+1. Output only 1-3 words maximum
+2. NO explanations or labels
+3. NO punctuation except spaces between words
+4. If input ends with partial word, complete it based on full context
+5. If input ends with full word or space, suggest next logical words
+6. Never repeat words from input
+7. Keep suggestions natural and contextual
+8. Suggestions must continue the sentence grammatically
+
+Examples:
+Input: "I need to fi" → find
+Input: "I need to" → get started with
+Input: "The weather is" → very nice today
+Input: "google translate is a search engine that" → helps users translate
+Input: "google is a company that" → provides search services`;
+
+        const response = await fetch(endpoint, {
+            method: 'POST',
+            signal,
+            headers,
             body: JSON.stringify({
-                model: 'anthropic/claude-3-haiku',
+                model,
                 messages: [
                     {
                         role: 'system',
-                        content: 'You are an autocomplete assistant. Given the start of a sentence, extend it with a natural completion. Only respond with the completion part, no explanation. Keep completions concise.'
+                        content: systemPrompt
                     },
                     {
                         role: 'user',
-                        content: `Complete this text naturally: "${text}"`
+                        content: text
                     }
                 ],
                 max_tokens: 50,
@@ -194,41 +425,159 @@ async function getAISuggestion(text) {
             })
         });
 
-        clearTimeout(timeoutId);
-
         if (!response.ok) {
-            const errorData = await response.json().catch(() => ({}));
-            console.error('API Response not OK:', response.status, errorData);
-            if (response.status === 401) {
-                console.error('Authentication failed. Please check your API key.');
-            }
-            throw new Error(`API request failed: ${response.status} ${JSON.stringify(errorData)}`);
+            console.error('API Response not OK:', response.status);
+            return null;
         }
 
-        const data = await response.json();
-        console.log('API Response:', data);
+        let data;
+        try {
+            data = await response.json();
+        } catch (parseError) {
+            console.error('Failed to parse API response:', parseError);
+            return null;
+        }
 
-        const suggestion = data.choices[0]?.message?.content?.trim();
-        console.log('Processed suggestion:', suggestion);
+        // More detailed error logging
+        if (!data) {
+            console.error('Empty response data');
+            return null;
+        }
 
-        if (suggestion) {
-            // Clean up the suggestion
-            const cleanSuggestion = suggestion
-                .replace(/^["']|["']$/g, '') // Remove quotes
-                .replace(/^[.,!?]\s*/, '') // Remove leading punctuation
-                .replace(/^\s+/, ''); // Remove leading whitespace
+        if (data.error) {
+            console.error('API returned error:', data.error);
+            return null;
+        }
 
-            // Only return the completion part, not the full text
-            return cleanSuggestion;
+        if (!data.choices || !Array.isArray(data.choices) || data.choices.length === 0) {
+            console.error('Invalid choices in response:', data);
+            return null;
+        }
+
+        const choice = data.choices[0];
+        if (!choice || !choice.message || !choice.message.content) {
+            console.error('Invalid choice structure:', choice);
+            return null;
+        }
+
+        const suggestion = choice.message.content.trim();
+        if (!suggestion) {
+            console.log('Empty suggestion received');
+            return null;
+        }
+
+        // More aggressive cleaning to remove any prefixes and keep only the actual suggestion
+        return suggestion
+            .split('\n')[0] // Take only first line
+            .replace(/^["']|["']$/g, '') // Remove quotes
+            .replace(/^[.,!?]\s*/, '') // Remove leading punctuation
+            .replace(/\s*[.,!?]\s*$/, '') // Remove trailing punctuation
+            .replace(/^(?:Output:|Output|→|\s)*/, '') // Remove Output: prefix and arrows
+            .replace(/^.*?:\s*/, '') // Remove any other prefixes with colons
+            .replace(/^.*?→\s*/, '') // Remove anything before and including →
+            .split(/\s+/).slice(0, 3).join(' ') // Keep max 3 words
+            .trim();
+
+    } catch (error) {
+        if (error.name === 'AbortError') {
+            console.log('Request cancelled');
+        } else {
+            console.error('Error in getAISuggestion:', error);
         }
         return null;
-    } catch (error) {
-        console.error('Error in getAISuggestion:', error);
-        if (error.name === 'AbortError') {
-            console.log('Request timed out');
-        }
-        throw error;
     }
+}
+
+function showSuggestion(suggestion, input) {
+    if (!suggestion || !input) return;
+
+    const existingSuggestion = document.querySelector('.suggestion-span');
+    if (existingSuggestion) {
+        existingSuggestion.remove();
+    }
+
+    let rect;
+    let textWidth;
+    let font;
+    let lineHeight;
+
+    // Handle Google Docs
+    if (window.location.hostname === 'docs.google.com') {
+        const cursor = document.querySelector('.kix-cursor');
+        if (cursor) {
+            rect = cursor.getBoundingClientRect();
+            font = '11pt Arial';
+            textWidth = 0;
+            lineHeight = parseInt(font) * 1.2;
+        } else {
+            return;
+        }
+    } else {
+        const computedStyle = window.getComputedStyle(input);
+        rect = input.getBoundingClientRect();
+        font = computedStyle.font;
+        lineHeight = computedStyle.lineHeight;
+        textWidth = getTextWidth(getValue(input), font);
+    }
+
+    const suggestionSpan = document.createElement('span');
+    suggestionSpan.className = 'suggestion-span';
+    suggestionSpan.style.cssText = `
+        position: fixed;
+        left: ${rect.left + textWidth}px;
+        top: ${rect.top + (rect.height - parseFloat(lineHeight)) / 2}px;
+        font: ${font};
+        color: #666;
+        pointer-events: none;
+        white-space: pre;
+        z-index: 999999;
+        line-height: ${lineHeight};
+    `;
+
+    suggestionSpan.textContent = suggestion;
+    document.body.appendChild(suggestionSpan);
+}
+
+// Add this function to show loading indicator
+function showLoadingIndicator(input) {
+    const existingLoading = document.querySelector('.suggestion-loading');
+    if (existingLoading) existingLoading.remove();
+
+    let rect;
+    let textWidth;
+    let font;
+    let lineHeight;
+
+    // Handle Google Docs
+    if (window.location.hostname === 'docs.google.com') {
+        const cursor = document.querySelector('.kix-cursor');
+        if (cursor) {
+            rect = cursor.getBoundingClientRect();
+            font = '11pt Arial';
+            textWidth = 0;
+            lineHeight = parseInt(font) * 1.2;
+        } else {
+            return;
+        }
+    } else {
+        const computedStyle = window.getComputedStyle(input);
+        rect = input.getBoundingClientRect();
+        font = computedStyle.font;
+        lineHeight = computedStyle.lineHeight;
+        textWidth = getTextWidth(getValue(input), font);
+    }
+
+    const loadingSpan = document.createElement('span');
+    loadingSpan.className = 'suggestion-loading';
+    loadingSpan.style.cssText = `
+        position: fixed;
+        left: ${rect.left + textWidth}px;
+        top: ${rect.top + (rect.height - parseFloat(lineHeight)) / 2}px;
+        font: ${font};
+        line-height: ${lineHeight};
+    `;
+    loadingSpan.textContent = '•••';
+    document.body.appendChild(loadingSpan);
 }
 
 // Helper function to calculate text width

@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>AI Autocomplete Settings</title>
+    <style>
+        body {
+            padding: 20px;
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        }
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 500;
+        }
+        input[type="text"] {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+        button {
+            background: #4285f4;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover {
+            background: #3367d6;
+        }
+        .status {
+            margin-top: 10px;
+            padding: 10px;
+            border-radius: 4px;
+            display: none;
+        }
+        .success {
+            background: #d4edda;
+            color: #155724;
+        }
+        .error {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        .api-select {
+            margin-bottom: 15px;
+        }
+        select {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            margin-bottom: 15px;
+        }
+        .api-key-input {
+            margin-bottom: 15px;
+        }
+        .help-text {
+            font-size: 0.9em;
+            color: #666;
+            margin-top: 5px;
+        }
+        .model-select {
+            margin-top: 10px;
+        }
+        .provider-section {
+            border: 1px solid #eee;
+            padding: 15px;
+            border-radius: 4px;
+            margin-bottom: 15px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>AI Autocomplete Settings</h1>
+        
+        <div class="form-group">
+            <label for="apiProvider">API Provider:</label>
+            <select id="apiProvider">
+                <option value="openrouter">OpenRouter</option>
+                <option value="groq">Groq</option>
+            </select>
+
+            <div id="openrouterSection" class="provider-section">
+                <div class="api-key-input">
+                    <label for="openrouterKey">OpenRouter API Key:</label>
+                    <input type="text" id="openrouterKey" placeholder="Enter your OpenRouter API key">
+                    <div class="help-text">
+                        Get your API key from <a href="https://openrouter.ai/keys" target="_blank">openrouter.ai/keys</a>
+                    </div>
+                </div>
+                <div class="model-select">
+                    <label for="openrouterModel">Model:</label>
+                    <select id="openrouterModel">
+                        <option value="deepseek/deepseek-r1:free">Deepseek R1 (Free)</option>
+                        <option value="mistral/mistral-tiny">Mistral Tiny</option>
+                        <option value="nousresearch/nous-capybara-7b">Nous Capybara 7B</option>
+                        <option value="openchat/openchat-7b">OpenChat 7B</option>
+                    </select>
+                </div>
+            </div>
+
+            <div id="groqSection" class="provider-section" style="display: none;">
+                <div class="api-key-input">
+                    <label for="groqKey">Groq API Key:</label>
+                    <input type="text" id="groqKey" placeholder="Enter your Groq API key">
+                    <div class="help-text">
+                        Get your API key from <a href="https://console.groq.com/keys" target="_blank">console.groq.com/keys</a>
+                    </div>
+                </div>
+                <div class="model-select">
+                    <label for="groqModel">Model:</label>
+                    <select id="groqModel">
+                        <option value="mixtral-8x7b-32768">Mixtral 8x7B</option>
+                        <option value="deepseek-ai/deepseek-llm-67b-chat">DeepSeek R1 Distill Llama 70B</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+
+        <button id="save">Save Settings</button>
+        <div id="status" class="status"></div>
+    </div>
+    <script src="options.js"></script>
+</body>
+</html> 
