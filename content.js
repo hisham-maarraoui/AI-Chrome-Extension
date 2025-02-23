@@ -137,6 +137,10 @@ function setValue(el, value) {
     }
 }
 
+// Add undo history tracking
+let undoHistory = [];
+const MAX_UNDO_HISTORY = 10;
+
 function initializeExtension() {
     let activeInput = null;
     let currentSuggestion = null;
@@ -144,7 +148,7 @@ function initializeExtension() {
     let lastInputText = '';
     let lastRequestController = null; // Track the latest request
 
-    // Update selector to include contenteditable elements and specific Gmail/Google Docs selectors
+    // Update the INPUT_SELECTOR to specifically target Google search
     const INPUT_SELECTOR = `
         input[type="text"], 
         input[type="search"], 
@@ -153,52 +157,77 @@ function initializeExtension() {
         [contenteditable="true"],
         .editable,
         .docs-texteventtarget-iframe,
-        .kix-lineview,
-        .docs-texteventtarget-iframe body
+        [role="textbox"],
+        [role="searchbox"],
+        [role="combobox"],
+        .public-DraftEditor-content,
+        .notion-page-content [contenteditable="true"],
+        .ql-editor,
+        .ProseMirror,
+        input[aria-label="Search"],
+        input[name="q"],
+        .gLFyf
     `.trim();
 
-    // Add mutation observer to handle dynamically added editors
+    // Enhanced MutationObserver configuration
+    const observerConfig = {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['contenteditable', 'role'], // Watch for dynamic contenteditable changes
+        characterData: true // Watch for text changes
+    };
+
+    // Enhanced observer callback
     const observer = new MutationObserver((mutations) => {
         for (const mutation of mutations) {
-            for (const node of mutation.addedNodes) {
-                if (node.nodeType === 1) { // Element node
-                    const inputs = node.matches(INPUT_SELECTOR) ?
-                        [node] :
-                        node.querySelectorAll(INPUT_SELECTOR);
-
-                    for (const input of inputs) {
-                        setupInput(input);
+            // Handle added nodes
+            if (mutation.type === 'childList') {
+                for (const node of mutation.addedNodes) {
+                    if (node.nodeType === 1) { // Element node
+                        // Check the node itself
+                        if (node.matches && node.matches(INPUT_SELECTOR)) {
+                            setupInput(node);
+                        }
+                        // Check child nodes
+                        const inputs = node.querySelectorAll(INPUT_SELECTOR);
+                        inputs.forEach(setupInput);
                     }
+                }
+            }
+            
+            // Handle attribute changes
+            if (mutation.type === 'attributes') {
+                const element = mutation.target;
+                if (element.matches && element.matches(INPUT_SELECTOR)) {
+                    setupInput(element);
                 }
             }
         }
     });
 
-    observer.observe(document.body, {
-        childList: true,
-        subtree: true
-    });
-
-    // Setup handlers for an input element
+    // Enhanced setupInput function
     function setupInput(input) {
-        // Skip if already setup
-        if (input.dataset.autocompleteSetup) return;
+        // Skip if already setup or is hidden/disabled
+        if (input.dataset.autocompleteSetup || 
+            input.style.display === 'none' || 
+            input.style.visibility === 'hidden' ||
+            input.disabled ||
+            input.readOnly) {
+            return;
+        }
+
         input.dataset.autocompleteSetup = 'true';
 
-        // Special handling for Google Docs
-        if (window.location.hostname === 'docs.google.com') {
-            const editor = document.querySelector('.docs-texteventtarget-iframe');
-            if (editor) {
-                try {
-                    const iframeDoc = editor.contentDocument || editor.contentWindow.document;
-                    iframeDoc.body.addEventListener('focusin', handleFocusIn);
-                    iframeDoc.body.addEventListener('focusout', handleFocusOut);
-                    iframeDoc.body.addEventListener('input', handleInput);
-                    iframeDoc.body.addEventListener('keydown', handleKeyDown);
-                } catch (e) {
-                    console.error('Failed to attach to Google Docs iframe:', e);
-                }
-            }
+        // Special handling for Google search
+        if (window.location.hostname.includes('google') && 
+            (input.matches('input[name="q"], .gLFyf') || 
+             input.matches('.gb_je, .aJl'))) {
+            // Force the input to be treated as a regular input field
+            input.addEventListener('input', handleInput);
+            input.addEventListener('keydown', handleKeyDown);
+            input.addEventListener('focusin', handleFocusIn);
+            input.addEventListener('focusout', handleFocusOut);
             return;
         }
 
@@ -209,14 +238,23 @@ function initializeExtension() {
         input.addEventListener('keydown', handleKeyDown);
     }
 
-    // Setup existing inputs
+    // Start observing with the enhanced configuration
+    observer.observe(document.body, observerConfig);
+
+    // Initial setup for existing elements
     document.querySelectorAll(INPUT_SELECTOR).forEach(setupInput);
+
+    // Cleanup on page unload
+    window.addEventListener('unload', () => {
+        observer.disconnect();
+    });
 
     // Update event handlers to work with contenteditable
     function handleFocusIn(e) {
         const input = e.target;
         if (input.matches(INPUT_SELECTOR) && !input.readOnly && !input.disabled) {
             activeInput = input;
+            undoHistory = []; // Clear undo history for new input
         }
     }
 
@@ -290,36 +328,163 @@ function initializeExtension() {
         }, DEBOUNCE_MS);
     }
 
-    // Add this function after handleInput
+    // Update handleKeyDown function to better handle Gmail editors
     function handleKeyDown(e) {
-        if (e.key === 'Backspace' && activeInput) {
-            // Immediately clear suggestion on backspace
-            const suggestionSpan = document.querySelector('.suggestion-span');
-            if (suggestionSpan) {
-                suggestionSpan.remove();
-                currentSuggestion = null;
+        if ((e.ctrlKey || e.metaKey) && e.key === 'z' && undoHistory.length > 0) {
+            e.preventDefault();
+            e.stopPropagation();
+            
+            const lastState = undoHistory.pop();
+            if (lastState) {
+                const { input, value, selection } = lastState;
+                input.value = value;
+                input.selectionStart = selection.start;
+                input.selectionEnd = selection.end;
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+                showUndoIndicator('Last suggestion undone');
             }
+            return;
         }
 
         if (e.key === 'Tab' && currentSuggestion && activeInput) {
             e.preventDefault();
+            e.stopPropagation();
 
             const suggestionSpan = document.querySelector('.suggestion-span');
             if (suggestionSpan) {
                 suggestionSpan.remove();
             }
 
-            // Get text content appropriately based on input type
-            const inputText = getValue(activeInput);
-            const lastWord = inputText.split(/[\s.!?]+/).pop() || '';
+            // Save current state before modification
+            const currentState = {
+                input: activeInput,
+                value: activeInput.value,
+                selection: {
+                    start: activeInput.selectionStart,
+                    end: activeInput.selectionEnd
+                }
+            };
 
-            const isCompletion = currentSuggestion.toLowerCase().startsWith(lastWord.toLowerCase()) &&
-                currentSuggestion.toLowerCase() !== lastWord.toLowerCase();
+            // Handle Google search with more careful text handling
+            if (window.location.hostname.includes('google') && 
+                activeInput.matches('input[name="q"], .gLFyf')) {
+                const fullText = activeInput.value;
+                const cursorPosition = activeInput.selectionStart;
+                
+                // Get the word at cursor
+                const textBeforeCursor = fullText.slice(0, cursorPosition);
+                const textAfterCursor = fullText.slice(cursorPosition);
+                const wordsBeforeCursor = textBeforeCursor.split(/\s+/);
+                const lastWord = wordsBeforeCursor[wordsBeforeCursor.length - 1] || '';
+                
+                const isCompletion = currentSuggestion.toLowerCase().startsWith(lastWord.toLowerCase()) &&
+                    currentSuggestion.toLowerCase() !== lastWord.toLowerCase();
 
-            let displayText = isCompletion ? currentSuggestion.slice(lastWord.length) : currentSuggestion;
-            const needsSpace = !isCompletion && !inputText.endsWith(' ') && inputText.length > 0;
+                let newValue;
+                if (isCompletion && lastWord) {
+                    // Replace only the last word
+                    wordsBeforeCursor[wordsBeforeCursor.length - 1] = currentSuggestion;
+                    newValue = [...wordsBeforeCursor, textAfterCursor].join(' ');
+                } else {
+                    // Add the suggestion with proper spacing
+                    const needsSpace = !textBeforeCursor.endsWith(' ') && textBeforeCursor.length > 0;
+                    newValue = textBeforeCursor + (needsSpace ? ' ' : '') + currentSuggestion + textAfterCursor;
+                }
 
-            setValue(activeInput, inputText + (needsSpace ? ' ' : '') + displayText);
+                // Update input
+                activeInput.value = newValue;
+                const newCursorPosition = newValue.length;
+                activeInput.selectionStart = activeInput.selectionEnd = newCursorPosition;
+                
+                // Save to undo history and show indicator
+                undoHistory.push(currentState);
+                if (undoHistory.length > MAX_UNDO_HISTORY) {
+                    undoHistory.shift();
+                }
+                showUndoIndicator('Ctrl+Z to undo');
+                
+                // Trigger input event
+                activeInput.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+            // Handle Gmail compose editor
+            else if (activeInput.isContentEditable || activeInput.contentEditable === 'true') {
+                const selection = window.getSelection();
+                if (!selection.rangeCount) return;
+
+                const range = selection.getRangeAt(0);
+                const text = activeInput.textContent;
+                const lastWord = text.split(/[\s.!?]+/).pop() || '';
+
+                const isCompletion = currentSuggestion.toLowerCase().startsWith(lastWord.toLowerCase()) &&
+                    currentSuggestion.toLowerCase() !== lastWord.toLowerCase();
+
+                // If it's completing a word, delete the partial word first
+                if (isCompletion) {
+                    range.setStart(range.endContainer, range.endOffset - lastWord.length);
+                    range.deleteContents();
+                }
+
+                // Insert the suggestion
+                const needsSpace = !isCompletion && !text.endsWith(' ') && text.length > 0;
+                const textNode = document.createTextNode((needsSpace ? ' ' : '') + currentSuggestion);
+                range.insertNode(textNode);
+
+                // Move cursor to end
+                range.setStartAfter(textNode);
+                range.setEndAfter(textNode);
+                selection.removeAllRanges();
+                selection.addRange(range);
+
+                // Trigger input event for Gmail
+                const inputEvent = new InputEvent('input', {
+                    bubbles: true,
+                    cancelable: true,
+                });
+                activeInput.dispatchEvent(inputEvent);
+            } 
+            // Handle Gmail search field
+            else if (window.location.hostname === 'mail.google.com' && 
+                     (activeInput.matches('[role="searchbox"]') || activeInput.matches('[aria-label*="Search"]'))) {
+                const text = activeInput.value;
+                const lastWord = text.split(/[\s.!?]+/).pop() || '';
+                
+                const isCompletion = currentSuggestion.toLowerCase().startsWith(lastWord.toLowerCase()) &&
+                    currentSuggestion.toLowerCase() !== lastWord.toLowerCase();
+
+                if (isCompletion) {
+                    // Replace the partial word
+                    activeInput.value = text.slice(0, -lastWord.length) + currentSuggestion;
+                } else {
+                    // Add the full suggestion
+                    const needsSpace = !text.endsWith(' ') && text.length > 0;
+                    activeInput.value = text + (needsSpace ? ' ' : '') + currentSuggestion;
+                }
+
+                // Move cursor to end
+                activeInput.selectionStart = activeInput.selectionEnd = activeInput.value.length;
+
+                // Trigger input event
+                activeInput.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+            // Handle other inputs
+            else {
+                const text = getValue(activeInput);
+                const lastWord = text.split(/[\s.!?]+/).pop() || '';
+
+                const isCompletion = currentSuggestion.toLowerCase().startsWith(lastWord.toLowerCase()) &&
+                    currentSuggestion.toLowerCase() !== lastWord.toLowerCase();
+
+                let newValue;
+                if (isCompletion) {
+                    newValue = text.slice(0, -lastWord.length) + currentSuggestion;
+                } else {
+                    const needsSpace = !text.endsWith(' ') && text.length > 0;
+                    newValue = text + (needsSpace ? ' ' : '') + currentSuggestion;
+                }
+
+                setValue(activeInput, newValue);
+            }
+
             currentSuggestion = null;
         }
     }
@@ -339,6 +504,53 @@ function initializeExtension() {
             currentSuggestion = null;
         }
     });
+
+    // Add visual indicator for undo availability
+    function showUndoIndicator(message) {
+        const existingIndicator = document.querySelector('.undo-indicator');
+        if (existingIndicator) {
+            existingIndicator.remove();
+        }
+
+        const indicator = document.createElement('div');
+        indicator.className = 'undo-indicator';
+        indicator.style.cssText = `
+            position: fixed;
+            left: 50%;
+            top: 20px;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 8px 16px;
+            border-radius: 4px;
+            font-size: 13px;
+            z-index: 999999;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.3s;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+        `;
+        
+        // Add keyboard icon
+        indicator.innerHTML = `
+            <span style="font-family: monospace;">⌘Z</span>
+            <span>${message}</span>
+        `;
+        
+        document.body.appendChild(indicator);
+
+        // Animate
+        requestAnimationFrame(() => {
+            indicator.style.opacity = '1';
+            setTimeout(() => {
+                indicator.style.opacity = '0';
+                setTimeout(() => indicator.remove(), 300);
+            }, 2000);
+        });
+    }
 }
 
 async function getAISuggestion(text, signal) {
@@ -390,8 +602,72 @@ async function getAISuggestion(text, signal) {
             'google': 'gemini-1.5-flash' // Fixed to Gemini 1.5 Flash
         }[API_PROVIDER];
 
-        const systemPrompt = API_PROVIDER === 'openrouter' ?
-            `You are an autocomplete assistant. Follow these rules strictly:
+        let body;
+        if (API_PROVIDER === 'google') {
+            const lastWord = text.split(/\s+/).pop() || '';
+            const isPartialWord = !text.endsWith(' ');
+
+            body = JSON.stringify({
+                contents: [{
+                    parts: [{
+                        text: isPartialWord ?
+                            `Complete this business-related word (only return the completion part): "${lastWord}"` :
+                            `Suggest what comes next in a business context (1-3 new words only): "${text}". Focus on factual business descriptions.`
+                    }]
+                }],
+                safetySettings: [{
+                    category: "HARM_CATEGORY_DANGEROUS_CONTENT",
+                    threshold: "BLOCK_NONE"
+                }],
+                generationConfig: {
+                    temperature: 0.1, // Lower temperature for more focused suggestions
+                    maxOutputTokens: 20,
+                    topP: 0.3, // Lower top_p for more focused suggestions
+                    topK: 10
+                }
+            });
+        } else if (API_PROVIDER === 'groq') {
+            body = JSON.stringify({
+                model,
+                messages: [
+                    {
+                        role: 'system',
+                        content: `You are a business-focused autocomplete assistant. Your task is to predict the next few words that would naturally complete business-related descriptions.
+
+Rules:
+1. Only suggest 1-3 words that directly continue the input text
+2. Focus on factual, business-appropriate completions
+3. Never repeat words from the input
+4. Keep suggestions professional and contextual
+5. No explanations or labels, just the completion
+6. For partial words, complete only that word
+7. For company descriptions, focus on their products, services, or industry position
+
+Examples:
+Input: "Microsoft is a company that" → develops software solutions
+Input: "Apple focuses on" → consumer electronics innovation
+Input: "Tesla manufactures" → electric vehicles and
+Input: "Amazon provides" → cloud computing services
+Input: "The business strategy" → focuses on growth`
+                    },
+                    {
+                        role: 'user',
+                        content: text
+                    }
+                ],
+                max_tokens: 20,
+                temperature: 0.1,     // Very low temperature for focused suggestions
+                top_p: 0.2,          // Even lower top_p for more predictable completions
+                frequency_penalty: 0.3,
+                presence_penalty: 0.3
+            });
+        } else {
+            body = JSON.stringify({
+                model,
+                messages: [
+                    {
+                        role: 'system',
+                        content: `You are an autocomplete assistant. Follow these rules strictly:
 1. If input ends with a partial word, complete that word naturally in the context
 2. If input ends with a complete word or space, suggest the next 1-3 words that make sense in context
 3. Never repeat words that are already in the input
@@ -406,58 +682,7 @@ Input: "I need to fi" → find
 Input: "I need to" → get started with
 Input: "The weather is" → very nice today
 Input: "google translate is a search engine that" → helps users translate
-Input: "google is a company that" → provides search services` :
-            // Stricter prompt for Groq
-            `You are an autocomplete assistant. Return ONLY contextually appropriate completions.
-
-Rules:
-1. Output only 1-3 words maximum
-2. NO explanations or labels
-3. NO punctuation except spaces between words
-4. If input ends with partial word, complete it based on full context
-5. If input ends with full word or space, suggest next logical words
-6. Never repeat words from input
-7. Keep suggestions natural and contextual
-8. Suggestions must continue the sentence grammatically
-
-Examples:
-Input: "I need to fi" → find
-Input: "I need to" → get started with
-Input: "The weather is" → very nice today
-Input: "google translate is a search engine that" → helps users translate
-Input: "google is a company that" → provides search services`;
-
-        let body;
-        if (API_PROVIDER === 'google') {
-            const lastWord = text.split(/\s+/).pop() || '';
-            const isPartialWord = !text.endsWith(' ');
-
-            body = JSON.stringify({
-                contents: [{
-                    parts: [{
-                        text: isPartialWord ?
-                            `Complete this word (only return the completion part): "${lastWord}"` :
-                            `Suggest what comes next (1-3 new words only): "${text}"`
-                    }]
-                }],
-                safetySettings: [{
-                    category: "HARM_CATEGORY_DANGEROUS_CONTENT",
-                    threshold: "BLOCK_NONE"
-                }],
-                generationConfig: {
-                    temperature: 0.3,
-                    maxOutputTokens: 20,
-                    topP: 0.8,
-                    topK: 10
-                }
-            });
-        } else {
-            body = JSON.stringify({
-                model,
-                messages: [
-                    {
-                        role: 'system',
-                        content: systemPrompt
+Input: "google is a company that" → provides search services`
                     },
                     {
                         role: 'user',
@@ -594,96 +819,193 @@ Input: "google is a company that" → provides search services`;
     }
 }
 
+// Update showSuggestion function with specific Gmail search handling
 function showSuggestion(suggestion, input) {
     if (!suggestion || !input) return;
 
-    const existingSuggestion = document.querySelector('.suggestion-span');
-    if (existingSuggestion) {
-        existingSuggestion.remove();
-    }
+    try {
+        const existingSuggestion = document.querySelector('.suggestion-span');
+        if (existingSuggestion) {
+            existingSuggestion.remove();
+        }
 
-    let rect;
-    let textWidth;
-    let font;
-    let lineHeight;
+        let rect;
+        let textWidth;
+        let font;
+        let lineHeight;
 
-    // Handle Google Docs
-    if (window.location.hostname === 'docs.google.com') {
-        const cursor = document.querySelector('.kix-cursor');
-        if (cursor) {
-            rect = cursor.getBoundingClientRect();
-            font = '11pt Arial';
-            textWidth = 0;
-            lineHeight = parseInt(font) * 1.2;
-        } else {
+        // Special handling for Gmail search field
+        if (window.location.hostname === 'mail.google.com' && 
+            (input.matches('[role="searchbox"]') || input.matches('[aria-label*="Search"]'))) {
+            const computedStyle = window.getComputedStyle(input);
+            rect = input.getBoundingClientRect();
+            font = computedStyle.font;
+            lineHeight = computedStyle.lineHeight;
+            
+            // More accurate text measurement
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            ctx.font = font;
+            textWidth = ctx.measureText(input.value).width;
+            
+            // Adjust for search icon and padding
+            const searchIconWidth = 40; // Increased for better spacing
+            const paddingLeft = parseFloat(computedStyle.paddingLeft) || 20;
+            
+            textWidth += searchIconWidth + paddingLeft;
+
+            // Create suggestion with better positioning
+            const suggestionSpan = document.createElement('span');
+            suggestionSpan.className = 'suggestion-span';
+            suggestionSpan.style.cssText = `
+                position: fixed;
+                left: ${rect.left + textWidth}px;
+                top: ${rect.top}px;
+                font: ${font || 'inherit'};
+                color: #666;
+                pointer-events: none;
+                white-space: pre;
+                z-index: 999999;
+                height: ${rect.height}px;
+                display: flex;
+                align-items: center;
+                padding-left: 4px;
+                background: transparent;
+            `;
+            suggestionSpan.textContent = suggestion;
+            document.body.appendChild(suggestionSpan);
             return;
         }
-    } else {
-        const computedStyle = window.getComputedStyle(input);
-        rect = input.getBoundingClientRect();
-        font = computedStyle.font;
-        lineHeight = computedStyle.lineHeight;
-        textWidth = getTextWidth(getValue(input), font);
+
+        // Handle contenteditable elements (like Gmail editor)
+        else if (input.isContentEditable || input.contentEditable === 'true') {
+            const selection = window.getSelection();
+            if (!selection.rangeCount) return;
+
+            const range = selection.getRangeAt(0);
+            const preCaretRange = range.cloneRange();
+            preCaretRange.selectNodeContents(input);
+            preCaretRange.setEnd(range.endContainer, range.endOffset);
+            
+            // Get the client rect of the range
+            const rects = range.getClientRects();
+            rect = rects[rects.length - 1] || range.getBoundingClientRect();
+
+            // Get computed style from the parent element
+            const computedStyle = window.getComputedStyle(input);
+            font = computedStyle.font;
+            lineHeight = computedStyle.lineHeight;
+            
+            // For contenteditable, we don't need additional text width
+            textWidth = 0;
+        } 
+        // Handle regular input fields (like Google search)
+        else {
+            const computedStyle = window.getComputedStyle(input);
+            rect = input.getBoundingClientRect();
+            font = computedStyle.font;
+            lineHeight = computedStyle.lineHeight;
+            textWidth = getTextWidth(input.value || getValue(input), font);
+
+            // Adjust for padding in regular inputs
+            const paddingLeft = parseFloat(computedStyle.paddingLeft) || 0;
+            textWidth += paddingLeft;
+        }
+
+        const suggestionSpan = document.createElement('span');
+        suggestionSpan.className = 'suggestion-span';
+        suggestionSpan.style.cssText = `
+            position: fixed;
+            left: ${rect.left + textWidth}px;
+            top: ${rect.top}px;
+            font: ${font || 'inherit'};
+            color: #666;
+            pointer-events: none;
+            white-space: pre;
+            z-index: 999999;
+            line-height: ${lineHeight || 'inherit'};
+            height: ${rect.height}px;
+            display: flex;
+            align-items: center;
+        `;
+
+        suggestionSpan.textContent = suggestion;
+        document.body.appendChild(suggestionSpan);
+    } catch (error) {
+        console.error('Error showing suggestion:', error);
     }
-
-    const suggestionSpan = document.createElement('span');
-    suggestionSpan.className = 'suggestion-span';
-    suggestionSpan.style.cssText = `
-        position: fixed;
-        left: ${rect.left + textWidth}px;
-        top: ${rect.top + (rect.height - parseFloat(lineHeight)) / 2}px;
-        font: ${font};
-        color: #666;
-        pointer-events: none;
-        white-space: pre;
-        z-index: 999999;
-        line-height: ${lineHeight};
-    `;
-
-    suggestionSpan.textContent = suggestion;
-    document.body.appendChild(suggestionSpan);
 }
 
-// Add this function to show loading indicator
+// Update showLoadingIndicator similarly
 function showLoadingIndicator(input) {
-    const existingLoading = document.querySelector('.suggestion-loading');
-    if (existingLoading) existingLoading.remove();
+    if (!input) return;
 
-    let rect;
-    let textWidth;
-    let font;
-    let lineHeight;
+    try {
+        const existingLoading = document.querySelector('.suggestion-loading');
+        if (existingLoading) existingLoading.remove();
 
-    // Handle Google Docs
-    if (window.location.hostname === 'docs.google.com') {
-        const cursor = document.querySelector('.kix-cursor');
-        if (cursor) {
-            rect = cursor.getBoundingClientRect();
-            font = '11pt Arial';
-            textWidth = 0;
-            lineHeight = parseInt(font) * 1.2;
-        } else {
-            return;
+        let rect;
+        let textWidth;
+        let font;
+        let lineHeight;
+
+        // Special handling for Gmail search field
+        if (window.location.hostname === 'mail.google.com' && 
+            (input.matches('[role="searchbox"]') || input.matches('[aria-label*="Search"]'))) {
+            const computedStyle = window.getComputedStyle(input);
+            rect = input.getBoundingClientRect();
+            font = computedStyle.font;
+            lineHeight = computedStyle.lineHeight;
+            
+            const searchIconWidth = 32;
+            const paddingLeft = parseFloat(computedStyle.paddingLeft) || 16;
+            
+            textWidth = getTextWidth(input.value || getValue(input), font);
+            textWidth += paddingLeft + searchIconWidth;
         }
-    } else {
-        const computedStyle = window.getComputedStyle(input);
-        rect = input.getBoundingClientRect();
-        font = computedStyle.font;
-        lineHeight = computedStyle.lineHeight;
-        textWidth = getTextWidth(getValue(input), font);
-    }
+        // Handle contenteditable elements
+        else if (input.isContentEditable || input.contentEditable === 'true') {
+            const selection = window.getSelection();
+            if (!selection.rangeCount) return;
 
-    const loadingSpan = document.createElement('span');
-    loadingSpan.className = 'suggestion-loading';
-    loadingSpan.style.cssText = `
-        position: fixed;
-        left: ${rect.left + textWidth}px;
-        top: ${rect.top + (rect.height - parseFloat(lineHeight)) / 2}px;
-        font: ${font};
-        line-height: ${lineHeight};
-    `;
-    loadingSpan.textContent = '•••';
-    document.body.appendChild(loadingSpan);
+            const range = selection.getRangeAt(0);
+            const rects = range.getClientRects();
+            rect = rects[rects.length - 1] || range.getBoundingClientRect();
+
+            const computedStyle = window.getComputedStyle(input);
+            font = computedStyle.font;
+            lineHeight = computedStyle.lineHeight;
+            textWidth = 0;
+        } 
+        // Handle regular input fields
+        else {
+            const computedStyle = window.getComputedStyle(input);
+            rect = input.getBoundingClientRect();
+            font = computedStyle.font;
+            lineHeight = computedStyle.lineHeight;
+            textWidth = getTextWidth(input.value || getValue(input), font);
+
+            const paddingLeft = parseFloat(computedStyle.paddingLeft) || 0;
+            textWidth += paddingLeft;
+        }
+
+        const loadingSpan = document.createElement('span');
+        loadingSpan.className = 'suggestion-loading';
+        loadingSpan.style.cssText = `
+            position: fixed;
+            left: ${rect.left + textWidth}px;
+            top: ${rect.top}px;
+            font: ${font || 'inherit'};
+            line-height: ${lineHeight || 'inherit'};
+            height: ${rect.height}px;
+            display: flex;
+            align-items: center;
+        `;
+        loadingSpan.textContent = '•••';
+        document.body.appendChild(loadingSpan);
+    } catch (error) {
+        console.error('Error showing loading indicator:', error);
+    }
 }
 
 // Helper function to calculate text width
