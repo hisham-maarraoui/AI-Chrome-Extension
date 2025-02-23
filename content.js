@@ -7,11 +7,16 @@ let API_PROVIDER = 'openrouter';
 let OPENROUTER_MODEL = 'deepseek/deepseek-r1:free';
 let GROQ_MODEL = 'mixtral-8x7b-32768';
 
+// Add Google configuration
+let GOOGLE_API_KEY = null;
+let GOOGLE_MODEL = 'gemini-1.5-flash'; // Fixed to Gemini 1.5 Flash
+
 // Get API keys and settings from storage
 chrome.storage.sync.get([
     'apiProvider',
     'openrouterKey',
     'groqKey',
+    'googleKey',
     'openrouterModel',
     'groqModel'
 ], (result) => {
@@ -23,6 +28,9 @@ chrome.storage.sync.get([
     }
     if (result.groqKey) {
         GROQ_API_KEY = result.groqKey;
+    }
+    if (result.googleKey) {
+        GOOGLE_API_KEY = result.googleKey;
     }
     if (result.openrouterModel) {
         OPENROUTER_MODEL = result.openrouterModel;
@@ -340,7 +348,12 @@ async function getAISuggestion(text, signal) {
             return null;
         }
 
-        const activeKey = API_PROVIDER === 'openrouter' ? OPENROUTER_API_KEY : GROQ_API_KEY;
+        const activeKey = {
+            'openrouter': OPENROUTER_API_KEY,
+            'groq': GROQ_API_KEY,
+            'google': GOOGLE_API_KEY
+        }[API_PROVIDER];
+
         if (!activeKey) {
             console.error('No API key set. Please configure in extension settings.');
             return null;
@@ -348,24 +361,34 @@ async function getAISuggestion(text, signal) {
 
         console.log('Making API request for text:', text);
 
-        const endpoint = API_PROVIDER === 'openrouter'
-            ? 'https://openrouter.ai/api/v1/chat/completions'
-            : 'https://api.groq.com/openai/v1/chat/completions';
+        const endpoint = {
+            'openrouter': 'https://openrouter.ai/api/v1/chat/completions',
+            'groq': 'https://api.groq.com/openai/v1/chat/completions',
+            'google': `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GOOGLE_API_KEY}`
+        }[API_PROVIDER];
 
-        const headers = API_PROVIDER === 'openrouter'
-            ? {
+        const headers = {
+            'openrouter': {
                 'Authorization': `Bearer ${activeKey}`,
                 'Content-Type': 'application/json',
                 'Origin': 'https://openrouter.ai',
                 'Referer': 'https://openrouter.ai/',
                 'HTTP-Referer': 'https://openrouter.ai/'
-            }
-            : {
+            },
+            'groq': {
                 'Authorization': `Bearer ${activeKey}`,
                 'Content-Type': 'application/json'
-            };
+            },
+            'google': {
+                'Content-Type': 'application/json'
+            }
+        }[API_PROVIDER];
 
-        const model = API_PROVIDER === 'openrouter' ? OPENROUTER_MODEL : GROQ_MODEL;
+        const model = {
+            'openrouter': OPENROUTER_MODEL,
+            'groq': GROQ_MODEL,
+            'google': 'gemini-1.5-flash' // Fixed to Gemini 1.5 Flash
+        }[API_PROVIDER];
 
         const systemPrompt = API_PROVIDER === 'openrouter' ?
             `You are an autocomplete assistant. Follow these rules strictly:
@@ -404,11 +427,32 @@ Input: "The weather is" → very nice today
 Input: "google translate is a search engine that" → helps users translate
 Input: "google is a company that" → provides search services`;
 
-        const response = await fetch(endpoint, {
-            method: 'POST',
-            signal,
-            headers,
-            body: JSON.stringify({
+        let body;
+        if (API_PROVIDER === 'google') {
+            const lastWord = text.split(/\s+/).pop() || '';
+            const isPartialWord = !text.endsWith(' ');
+
+            body = JSON.stringify({
+                contents: [{
+                    parts: [{
+                        text: isPartialWord ?
+                            `Complete this word (only return the completion part): "${lastWord}"` :
+                            `Suggest what comes next (1-3 new words only): "${text}"`
+                    }]
+                }],
+                safetySettings: [{
+                    category: "HARM_CATEGORY_DANGEROUS_CONTENT",
+                    threshold: "BLOCK_NONE"
+                }],
+                generationConfig: {
+                    temperature: 0.3,
+                    maxOutputTokens: 20,
+                    topP: 0.8,
+                    topK: 10
+                }
+            });
+        } else {
+            body = JSON.stringify({
                 model,
                 messages: [
                     {
@@ -422,7 +466,14 @@ Input: "google is a company that" → provides search services`;
                 ],
                 max_tokens: 50,
                 temperature: 0.3
-            })
+            });
+        }
+
+        const response = await fetch(endpoint, {
+            method: 'POST',
+            signal,
+            headers,
+            body
         });
 
         if (!response.ok) {
@@ -449,18 +500,73 @@ Input: "google is a company that" → provides search services`;
             return null;
         }
 
-        if (!data.choices || !Array.isArray(data.choices) || data.choices.length === 0) {
-            console.error('Invalid choices in response:', data);
-            return null;
+        let suggestion;
+        if (API_PROVIDER === 'google') {
+            if (!data.candidates || !Array.isArray(data.candidates) || data.candidates.length === 0) {
+                console.error('No candidates in response:', data);
+                return null;
+            }
+
+            const candidate = data.candidates[0];
+            if (!candidate || !candidate.content || !candidate.content.parts || !candidate.content.parts[0]) {
+                console.error('Invalid candidate structure:', candidate);
+                return null;
+            }
+
+            let completionText = candidate.content.parts[0].text;
+
+            // Get the last word of input to help with separation
+            const lastWord = text.split(/\s+/).pop() || '';
+            const isPartialWord = !text.endsWith(' ');
+
+            // Clean up the response
+            completionText = completionText
+                .replace(/^.*?["']/, '') // Remove everything up to first quote
+                .replace(/["'].*$/, '') // Remove everything after last quote
+                .replace(/^[.,!?]\s*/, '') // Remove leading punctuation
+                .replace(/\s*[.,!?]\s*$/, '') // Remove trailing punctuation
+                .trim();
+
+            if (isPartialWord) {
+                // For partial words, only return the completion part
+                completionText = completionText
+                    .split(/\s+/)[0] // Take only first word
+                    .replace(new RegExp(`^${lastWord}`, 'i'), '') // Remove any repeated part
+                    .replace(/^[.,!?]\s*/, '') // Clean up again after removal
+                    .trim();
+            } else {
+                // For full words, ensure we're only getting new words
+                const inputWords = text.toLowerCase().split(/\s+/);
+                completionText = completionText
+                    .split(/\s+/)
+                    .filter(word => !inputWords.includes(word.toLowerCase())) // Remove any words from input
+                    .slice(0, 3) // Keep max 3 words
+                    .join(' ')
+                    .trim();
+
+                // Add leading space for full word completions
+                if (completionText) {
+                    completionText = ' ' + completionText;
+                }
+            }
+
+            suggestion = completionText;
+        } else {
+            // OpenRouter and Groq handling
+            if (!data.choices || !Array.isArray(data.choices) || data.choices.length === 0) {
+                console.error('Invalid choices in response:', data);
+                return null;
+            }
+
+            const choice = data.choices[0];
+            if (!choice || !choice.message || !choice.message.content) {
+                console.error('Invalid choice structure:', choice);
+                return null;
+            }
+
+            suggestion = choice.message.content.trim();
         }
 
-        const choice = data.choices[0];
-        if (!choice || !choice.message || !choice.message.content) {
-            console.error('Invalid choice structure:', choice);
-            return null;
-        }
-
-        const suggestion = choice.message.content.trim();
         if (!suggestion) {
             console.log('Empty suggestion received');
             return null;

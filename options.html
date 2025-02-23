@@ -88,6 +88,7 @@
             <select id="apiProvider">
                 <option value="openrouter">OpenRouter</option>
                 <option value="groq">Groq</option>
+                <option value="google">Google</option>
             </select>
 
             <div id="openrouterSection" class="provider-section">
@@ -123,6 +124,16 @@
                         <option value="mixtral-8x7b-32768">Mixtral 8x7B</option>
                         <option value="deepseek-ai/deepseek-llm-67b-chat">DeepSeek R1 Distill Llama 70B</option>
                     </select>
+                </div>
+            </div>
+
+            <div id="googleSection" class="provider-section" style="display: none;">
+                <div class="api-key-input">
+                    <label for="googleKey">Google API Key:</label>
+                    <input type="text" id="googleKey" placeholder="Enter your Google AI API key">
+                    <div class="help-text">
+                        Get your API key from <a href="https://ai.google.dev/" target="_blank">Google AI Studio</a>
+                    </div>
                 </div>
             </div>
         </div>

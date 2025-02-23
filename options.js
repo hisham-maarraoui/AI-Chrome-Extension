@@ -2,15 +2,24 @@ document.addEventListener('DOMContentLoaded', () => {
     const apiProvider = document.getElementById('apiProvider');
     const openrouterSection = document.getElementById('openrouterSection');
     const groqSection = document.getElementById('groqSection');
+    const googleSection = document.getElementById('googleSection');
 
     // Handle API provider selection
     apiProvider.addEventListener('change', () => {
-        if (apiProvider.value === 'openrouter') {
-            openrouterSection.style.display = 'block';
-            groqSection.style.display = 'none';
-        } else {
-            openrouterSection.style.display = 'none';
-            groqSection.style.display = 'block';
+        openrouterSection.style.display = 'none';
+        groqSection.style.display = 'none';
+        googleSection.style.display = 'none';
+
+        switch (apiProvider.value) {
+            case 'openrouter':
+                openrouterSection.style.display = 'block';
+                break;
+            case 'groq':
+                groqSection.style.display = 'block';
+                break;
+            case 'google':
+                googleSection.style.display = 'block';
+                break;
         }
     });
 
@@ -19,6 +28,7 @@ document.addEventListener('DOMContentLoaded', () => {
         'apiProvider',
         'openrouterKey',
         'groqKey',
+        'googleKey',
         'openrouterModel',
         'groqModel'
     ], (result) => {
@@ -38,6 +48,9 @@ document.addEventListener('DOMContentLoaded', () => {
         if (result.groqModel) {
             document.getElementById('groqModel').value = result.groqModel;
         }
+        if (result.googleKey) {
+            document.getElementById('googleKey').value = result.googleKey;
+        }
     });
 
     // Save settings
@@ -45,21 +58,26 @@ document.addEventListener('DOMContentLoaded', () => {
         const selectedProvider = apiProvider.value;
         const openrouterKey = document.getElementById('openrouterKey').value.trim();
         const groqKey = document.getElementById('groqKey').value.trim();
+        const googleKey = document.getElementById('googleKey').value.trim();
         const openrouterModel = document.getElementById('openrouterModel').value;
         const groqModel = document.getElementById('groqModel').value;
 
-        // Validate the active API key
-        const activeKey = selectedProvider === 'openrouter' ? openrouterKey : groqKey;
+        const activeKey = {
+            'openrouter': openrouterKey,
+            'groq': groqKey,
+            'google': googleKey
+        }[selectedProvider];
+
         if (!activeKey) {
             showStatus('Please enter an API key', 'error');
             return;
         }
 
-        // Save all settings
         chrome.storage.sync.set({
             apiProvider: selectedProvider,
             openrouterKey,
             groqKey,
+            googleKey,
             openrouterModel,
             groqModel
         }, () => {
