@@ -71,6 +71,15 @@ const loadingStyles = `
         z-index: 999999;
         animation: pulse 1.5s infinite;
     }
+    .tab-indicator {
+        font-size: 11px;
+        color: #999;
+        background: rgba(0, 0, 0, 0.06);
+        padding: 1px 4px;
+        border-radius: 3px;
+        margin-left: 4px;
+        font-family: system-ui, -apple-system, sans-serif;
+    }
 `;
 
 // Add style element to document
@@ -195,7 +204,7 @@ function initializeExtension() {
                     }
                 }
             }
-            
+
             // Handle attribute changes
             if (mutation.type === 'attributes') {
                 const element = mutation.target;
@@ -209,8 +218,8 @@ function initializeExtension() {
     // Enhanced setupInput function
     function setupInput(input) {
         // Skip if already setup or is hidden/disabled
-        if (input.dataset.autocompleteSetup || 
-            input.style.display === 'none' || 
+        if (input.dataset.autocompleteSetup ||
+            input.style.display === 'none' ||
             input.style.visibility === 'hidden' ||
             input.disabled ||
             input.readOnly) {
@@ -220,9 +229,9 @@ function initializeExtension() {
         input.dataset.autocompleteSetup = 'true';
 
         // Special handling for Google search
-        if (window.location.hostname.includes('google') && 
-            (input.matches('input[name="q"], .gLFyf') || 
-             input.matches('.gb_je, .aJl'))) {
+        if (window.location.hostname.includes('google') &&
+            (input.matches('input[name="q"], .gLFyf') ||
+                input.matches('.gb_je, .aJl'))) {
             // Force the input to be treated as a regular input field
             input.addEventListener('input', handleInput);
             input.addEventListener('keydown', handleKeyDown);
@@ -328,12 +337,12 @@ function initializeExtension() {
         }, DEBOUNCE_MS);
     }
 
-    // Update handleKeyDown function to better handle Gmail editors
+    // Update handleKeyDown function to fix all three issues
     function handleKeyDown(e) {
         if ((e.ctrlKey || e.metaKey) && e.key === 'z' && undoHistory.length > 0) {
             e.preventDefault();
             e.stopPropagation();
-            
+
             const lastState = undoHistory.pop();
             if (lastState) {
                 const { input, value, selection } = lastState;
@@ -358,74 +367,71 @@ function initializeExtension() {
             // Save current state before modification
             const currentState = {
                 input: activeInput,
-                value: activeInput.value,
+                value: activeInput.isContentEditable ? activeInput.textContent : activeInput.value,
                 selection: {
-                    start: activeInput.selectionStart,
-                    end: activeInput.selectionEnd
+                    start: activeInput.isContentEditable ?
+                        window.getSelection().getRangeAt(0).startOffset :
+                        activeInput.selectionStart,
+                    end: activeInput.isContentEditable ?
+                        window.getSelection().getRangeAt(0).endOffset :
+                        activeInput.selectionEnd
                 }
             };
 
-            // Handle Google search with more careful text handling
-            if (window.location.hostname.includes('google') && 
+            // Handle Google search
+            if (window.location.hostname.includes('google') &&
                 activeInput.matches('input[name="q"], .gLFyf')) {
-                const fullText = activeInput.value;
+                const text = activeInput.value;
                 const cursorPosition = activeInput.selectionStart;
-                
-                // Get the word at cursor
-                const textBeforeCursor = fullText.slice(0, cursorPosition);
-                const textAfterCursor = fullText.slice(cursorPosition);
-                const wordsBeforeCursor = textBeforeCursor.split(/\s+/);
-                const lastWord = wordsBeforeCursor[wordsBeforeCursor.length - 1] || '';
-                
+                const textBeforeCursor = text.slice(0, cursorPosition);
+                const textAfterCursor = text.slice(cursorPosition);
+                const lastWord = textBeforeCursor.split(/\s+/).pop() || '';
+
                 const isCompletion = currentSuggestion.toLowerCase().startsWith(lastWord.toLowerCase()) &&
                     currentSuggestion.toLowerCase() !== lastWord.toLowerCase();
 
-                let newValue;
                 if (isCompletion && lastWord) {
-                    // Replace only the last word
-                    wordsBeforeCursor[wordsBeforeCursor.length - 1] = currentSuggestion;
-                    newValue = [...wordsBeforeCursor, textAfterCursor].join(' ');
+                    // Replace only the last word before cursor
+                    const textWithoutLastWord = textBeforeCursor.slice(0, -lastWord.length);
+                    activeInput.value = textWithoutLastWord + currentSuggestion + textAfterCursor;
+                    activeInput.selectionStart = activeInput.selectionEnd =
+                        textWithoutLastWord.length + currentSuggestion.length;
                 } else {
-                    // Add the suggestion with proper spacing
+                    // Add suggestion at cursor position
                     const needsSpace = !textBeforeCursor.endsWith(' ') && textBeforeCursor.length > 0;
-                    newValue = textBeforeCursor + (needsSpace ? ' ' : '') + currentSuggestion + textAfterCursor;
+                    const newText = textBeforeCursor + (needsSpace ? ' ' : '') + currentSuggestion + textAfterCursor;
+                    activeInput.value = newText;
+                    const newPosition = textBeforeCursor.length + (needsSpace ? 1 : 0) + currentSuggestion.length;
+                    activeInput.selectionStart = activeInput.selectionEnd = newPosition;
                 }
-
-                // Update input
-                activeInput.value = newValue;
-                const newCursorPosition = newValue.length;
-                activeInput.selectionStart = activeInput.selectionEnd = newCursorPosition;
-                
-                // Save to undo history and show indicator
-                undoHistory.push(currentState);
-                if (undoHistory.length > MAX_UNDO_HISTORY) {
-                    undoHistory.shift();
-                }
-                showUndoIndicator('Ctrl+Z to undo');
-                
-                // Trigger input event
-                activeInput.dispatchEvent(new Event('input', { bubbles: true }));
             }
             // Handle Gmail compose editor
-            else if (activeInput.isContentEditable || activeInput.contentEditable === 'true') {
+            else if (activeInput.isContentEditable) {
                 const selection = window.getSelection();
                 if (!selection.rangeCount) return;
 
                 const range = selection.getRangeAt(0);
-                const text = activeInput.textContent;
-                const lastWord = text.split(/[\s.!?]+/).pop() || '';
+                const container = range.startContainer;
+                const offset = range.startOffset;
+
+                // Get text before cursor
+                let textBeforeCursor = '';
+                if (container.nodeType === Node.TEXT_NODE) {
+                    textBeforeCursor = container.textContent.slice(0, offset);
+                }
+                const lastWord = textBeforeCursor.split(/\s+/).pop() || '';
 
                 const isCompletion = currentSuggestion.toLowerCase().startsWith(lastWord.toLowerCase()) &&
                     currentSuggestion.toLowerCase() !== lastWord.toLowerCase();
 
-                // If it's completing a word, delete the partial word first
-                if (isCompletion) {
-                    range.setStart(range.endContainer, range.endOffset - lastWord.length);
+                if (isCompletion && lastWord) {
+                    // Delete the partial word
+                    range.setStart(container, offset - lastWord.length);
                     range.deleteContents();
                 }
 
                 // Insert the suggestion
-                const needsSpace = !isCompletion && !text.endsWith(' ') && text.length > 0;
+                const needsSpace = !isCompletion && !textBeforeCursor.endsWith(' ') && textBeforeCursor.length > 0;
                 const textNode = document.createTextNode((needsSpace ? ' ' : '') + currentSuggestion);
                 range.insertNode(textNode);
 
@@ -434,57 +440,44 @@ function initializeExtension() {
                 range.setEndAfter(textNode);
                 selection.removeAllRanges();
                 selection.addRange(range);
-
-                // Trigger input event for Gmail
-                const inputEvent = new InputEvent('input', {
-                    bubbles: true,
-                    cancelable: true,
-                });
-                activeInput.dispatchEvent(inputEvent);
-            } 
+            }
             // Handle Gmail search field
-            else if (window.location.hostname === 'mail.google.com' && 
-                     (activeInput.matches('[role="searchbox"]') || activeInput.matches('[aria-label*="Search"]'))) {
+            else if (window.location.hostname === 'mail.google.com' &&
+                (activeInput.matches('[role="searchbox"]') || activeInput.matches('[aria-label*="Search"]'))) {
                 const text = activeInput.value;
-                const lastWord = text.split(/[\s.!?]+/).pop() || '';
-                
-                const isCompletion = currentSuggestion.toLowerCase().startsWith(lastWord.toLowerCase()) &&
-                    currentSuggestion.toLowerCase() !== lastWord.toLowerCase();
-
-                if (isCompletion) {
-                    // Replace the partial word
-                    activeInput.value = text.slice(0, -lastWord.length) + currentSuggestion;
-                } else {
-                    // Add the full suggestion
-                    const needsSpace = !text.endsWith(' ') && text.length > 0;
-                    activeInput.value = text + (needsSpace ? ' ' : '') + currentSuggestion;
-                }
-
-                // Move cursor to end
-                activeInput.selectionStart = activeInput.selectionEnd = activeInput.value.length;
-
-                // Trigger input event
-                activeInput.dispatchEvent(new Event('input', { bubbles: true }));
-            }
-            // Handle other inputs
-            else {
-                const text = getValue(activeInput);
-                const lastWord = text.split(/[\s.!?]+/).pop() || '';
+                const cursorPosition = activeInput.selectionStart;
+                const textBeforeCursor = text.slice(0, cursorPosition);
+                const textAfterCursor = text.slice(cursorPosition);
+                const lastWord = textBeforeCursor.split(/\s+/).pop() || '';
 
                 const isCompletion = currentSuggestion.toLowerCase().startsWith(lastWord.toLowerCase()) &&
                     currentSuggestion.toLowerCase() !== lastWord.toLowerCase();
 
-                let newValue;
-                if (isCompletion) {
-                    newValue = text.slice(0, -lastWord.length) + currentSuggestion;
+                if (isCompletion && lastWord) {
+                    // Replace only the last word before cursor
+                    const textWithoutLastWord = textBeforeCursor.slice(0, -lastWord.length);
+                    activeInput.value = textWithoutLastWord + currentSuggestion + textAfterCursor;
+                    activeInput.selectionStart = activeInput.selectionEnd =
+                        textWithoutLastWord.length + currentSuggestion.length;
                 } else {
-                    const needsSpace = !text.endsWith(' ') && text.length > 0;
-                    newValue = text + (needsSpace ? ' ' : '') + currentSuggestion;
+                    // Add suggestion at cursor position
+                    const needsSpace = !textBeforeCursor.endsWith(' ') && textBeforeCursor.length > 0;
+                    const newText = textBeforeCursor + (needsSpace ? ' ' : '') + currentSuggestion + textAfterCursor;
+                    activeInput.value = newText;
+                    const newPosition = textBeforeCursor.length + (needsSpace ? 1 : 0) + currentSuggestion.length;
+                    activeInput.selectionStart = activeInput.selectionEnd = newPosition;
                 }
-
-                setValue(activeInput, newValue);
             }
 
+            // Save to undo history and show indicator
+            undoHistory.push(currentState);
+            if (undoHistory.length > MAX_UNDO_HISTORY) {
+                undoHistory.shift();
+            }
+            showUndoIndicator('Ctrl+Z to undo');
+
+            // Trigger input event
+            activeInput.dispatchEvent(new Event('input', { bubbles: true }));
             currentSuggestion = null;
         }
     }
@@ -533,13 +526,13 @@ function initializeExtension() {
             gap: 8px;
             box-shadow: 0 2px 6px rgba(0,0,0,0.2);
         `;
-        
+
         // Add keyboard icon
         indicator.innerHTML = `
             <span style="font-family: monospace;">⌘Z</span>
             <span>${message}</span>
         `;
-        
+
         document.body.appendChild(indicator);
 
         // Animate
@@ -551,6 +544,87 @@ function initializeExtension() {
             }, 2000);
         });
     }
+
+    // Add specific handler for Gmail compose
+    document.addEventListener('keydown', function (e) {
+        if (e.key === 'Tab' && currentSuggestion) {
+            const activeElement = document.activeElement;
+            const isGmailCompose = window.location.hostname === 'mail.google.com' &&
+                (activeElement.getAttribute('role') === 'textbox' ||
+                    activeElement.classList.contains('Am') ||
+                    activeElement.classList.contains('Al-editable') ||
+                    (activeElement.isContentEditable &&
+                        activeElement.closest('[contenteditable="true"]')));
+
+            if (isGmailCompose) {
+                e.preventDefault();
+                e.stopImmediatePropagation();
+
+                const selection = window.getSelection();
+                if (!selection.rangeCount) return;
+
+                const range = selection.getRangeAt(0);
+                const container = range.startContainer;
+                const offset = range.startOffset;
+
+                // Get text before cursor
+                let textBeforeCursor = '';
+                if (container.nodeType === Node.TEXT_NODE) {
+                    textBeforeCursor = container.textContent.slice(0, offset);
+                }
+                const lastWord = textBeforeCursor.split(/\s+/).pop() || '';
+
+                const isCompletion = currentSuggestion.toLowerCase().startsWith(lastWord.toLowerCase()) &&
+                    currentSuggestion.toLowerCase() !== lastWord.toLowerCase();
+
+                // Save current state for undo
+                const currentState = {
+                    input: activeElement,
+                    value: activeElement.textContent,
+                    selection: {
+                        start: offset,
+                        end: offset
+                    }
+                };
+
+                if (isCompletion && lastWord) {
+                    // Delete the partial word
+                    range.setStart(container, offset - lastWord.length);
+                    range.deleteContents();
+                }
+
+                // Insert the suggestion
+                const needsSpace = !isCompletion && !textBeforeCursor.endsWith(' ') && textBeforeCursor.length > 0;
+                const textNode = document.createTextNode((needsSpace ? ' ' : '') + currentSuggestion);
+                range.insertNode(textNode);
+
+                // Move cursor to end
+                range.setStartAfter(textNode);
+                range.setEndAfter(textNode);
+                selection.removeAllRanges();
+                selection.addRange(range);
+
+                // Save to undo history
+                undoHistory.push(currentState);
+                if (undoHistory.length > MAX_UNDO_HISTORY) {
+                    undoHistory.shift();
+                }
+                showUndoIndicator('Ctrl+Z to undo');
+
+                // Trigger input event
+                activeElement.dispatchEvent(new InputEvent('input', { bubbles: true }));
+
+                // Remove suggestion span
+                const suggestionSpan = document.querySelector('.suggestion-span');
+                if (suggestionSpan) {
+                    suggestionSpan.remove();
+                }
+
+                currentSuggestion = null;
+                return false;
+            }
+        }
+    }, true); // Use capture phase to handle event before Gmail's handlers
 }
 
 async function getAISuggestion(text, signal) {
@@ -819,7 +893,7 @@ Input: "google is a company that" → provides search services`
     }
 }
 
-// Update showSuggestion function with specific Gmail search handling
+// Update showSuggestion function's Gmail search handling
 function showSuggestion(suggestion, input) {
     if (!suggestion || !input) return;
 
@@ -835,31 +909,52 @@ function showSuggestion(suggestion, input) {
         let lineHeight;
 
         // Special handling for Gmail search field
-        if (window.location.hostname === 'mail.google.com' && 
+        if (window.location.hostname === 'mail.google.com' &&
             (input.matches('[role="searchbox"]') || input.matches('[aria-label*="Search"]'))) {
             const computedStyle = window.getComputedStyle(input);
             rect = input.getBoundingClientRect();
             font = computedStyle.font;
             lineHeight = computedStyle.lineHeight;
-            
+
             // More accurate text measurement
             const canvas = document.createElement('canvas');
             const ctx = canvas.getContext('2d');
             ctx.font = font;
-            textWidth = ctx.measureText(input.value).width;
-            
-            // Adjust for search icon and padding
-            const searchIconWidth = 40; // Increased for better spacing
-            const paddingLeft = parseFloat(computedStyle.paddingLeft) || 20;
-            
-            textWidth += searchIconWidth + paddingLeft;
+            const inputText = input.value || '';
 
-            // Create suggestion with better positioning
+            // Get exact text measurements
+            const metrics = ctx.measureText(inputText);
+            textWidth = metrics.width;
+
+            // Adjust for Gmail search's specific layout
+            const searchIconWidth = 40;  // Increased icon width
+            const paddingLeft = 40;      // Increased padding
+            const extraSpacing = 4;      // Add small gap between text and suggestion
+
+            // Calculate total offset
+            const totalOffset = searchIconWidth + paddingLeft + textWidth + extraSpacing;
+
+            // Create suggestion with adjusted positioning
             const suggestionSpan = document.createElement('span');
             suggestionSpan.className = 'suggestion-span';
+
+            // Create tab indicator
+            const tabIndicator = document.createElement('span');
+            tabIndicator.className = 'tab-indicator';
+            tabIndicator.textContent = 'Tab';
+
+            // Create text span
+            const textSpan = document.createElement('span');
+            textSpan.textContent = suggestion;
+
+            // Add both elements
+            suggestionSpan.appendChild(textSpan);
+            suggestionSpan.appendChild(tabIndicator);
+
+            // Update the base styles
             suggestionSpan.style.cssText = `
                 position: fixed;
-                left: ${rect.left + textWidth}px;
+                left: ${rect.left + totalOffset}px;
                 top: ${rect.top}px;
                 font: ${font || 'inherit'};
                 color: #666;
@@ -869,10 +964,10 @@ function showSuggestion(suggestion, input) {
                 height: ${rect.height}px;
                 display: flex;
                 align-items: center;
-                padding-left: 4px;
+                gap: 4px;
                 background: transparent;
             `;
-            suggestionSpan.textContent = suggestion;
+
             document.body.appendChild(suggestionSpan);
             return;
         }
@@ -886,7 +981,7 @@ function showSuggestion(suggestion, input) {
             const preCaretRange = range.cloneRange();
             preCaretRange.selectNodeContents(input);
             preCaretRange.setEnd(range.endContainer, range.endOffset);
-            
+
             // Get the client rect of the range
             const rects = range.getClientRects();
             rect = rects[rects.length - 1] || range.getBoundingClientRect();
@@ -895,10 +990,10 @@ function showSuggestion(suggestion, input) {
             const computedStyle = window.getComputedStyle(input);
             font = computedStyle.font;
             lineHeight = computedStyle.lineHeight;
-            
+
             // For contenteditable, we don't need additional text width
             textWidth = 0;
-        } 
+        }
         // Handle regular input fields (like Google search)
         else {
             const computedStyle = window.getComputedStyle(input);
@@ -914,6 +1009,21 @@ function showSuggestion(suggestion, input) {
 
         const suggestionSpan = document.createElement('span');
         suggestionSpan.className = 'suggestion-span';
+
+        // Create tab indicator
+        const tabIndicator = document.createElement('span');
+        tabIndicator.className = 'tab-indicator';
+        tabIndicator.textContent = 'Tab';
+
+        // Create text span
+        const textSpan = document.createElement('span');
+        textSpan.textContent = suggestion;
+
+        // Add both elements
+        suggestionSpan.appendChild(textSpan);
+        suggestionSpan.appendChild(tabIndicator);
+
+        // Update the base styles
         suggestionSpan.style.cssText = `
             position: fixed;
             left: ${rect.left + textWidth}px;
@@ -923,13 +1033,13 @@ function showSuggestion(suggestion, input) {
             pointer-events: none;
             white-space: pre;
             z-index: 999999;
-            line-height: ${lineHeight || 'inherit'};
             height: ${rect.height}px;
             display: flex;
             align-items: center;
+            gap: 4px;
+            background: transparent;
         `;
 
-        suggestionSpan.textContent = suggestion;
         document.body.appendChild(suggestionSpan);
     } catch (error) {
         console.error('Error showing suggestion:', error);
@@ -950,16 +1060,16 @@ function showLoadingIndicator(input) {
         let lineHeight;
 
         // Special handling for Gmail search field
-        if (window.location.hostname === 'mail.google.com' && 
+        if (window.location.hostname === 'mail.google.com' &&
             (input.matches('[role="searchbox"]') || input.matches('[aria-label*="Search"]'))) {
             const computedStyle = window.getComputedStyle(input);
             rect = input.getBoundingClientRect();
             font = computedStyle.font;
             lineHeight = computedStyle.lineHeight;
-            
+
             const searchIconWidth = 32;
             const paddingLeft = parseFloat(computedStyle.paddingLeft) || 16;
-            
+
             textWidth = getTextWidth(input.value || getValue(input), font);
             textWidth += paddingLeft + searchIconWidth;
         }
@@ -976,7 +1086,7 @@ function showLoadingIndicator(input) {
             font = computedStyle.font;
             lineHeight = computedStyle.lineHeight;
             textWidth = 0;
-        } 
+        }
         // Handle regular input fields
         else {
             const computedStyle = window.getComputedStyle(input);
