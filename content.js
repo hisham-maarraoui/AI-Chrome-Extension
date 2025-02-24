@@ -157,7 +157,7 @@ function initializeExtension() {
     let lastInputText = '';
     let lastRequestController = null; // Track the latest request
 
-    // Update the INPUT_SELECTOR to specifically target Google search
+    // Update INPUT_SELECTOR to include YouTube search
     const INPUT_SELECTOR = `
         input[type="text"], 
         input[type="search"], 
@@ -175,7 +175,10 @@ function initializeExtension() {
         .ProseMirror,
         input[aria-label="Search"],
         input[name="q"],
-        .gLFyf
+        input[name="search_query"],
+        .gLFyf,
+        #search,
+        .ytd-searchbox
     `.trim();
 
     // Enhanced MutationObserver configuration
@@ -337,7 +340,7 @@ function initializeExtension() {
         }, DEBOUNCE_MS);
     }
 
-    // Update handleKeyDown function to fix all three issues
+    // Update handleKeyDown function to handle both Google and YouTube search
     function handleKeyDown(e) {
         if ((e.ctrlKey || e.metaKey) && e.key === 'z' && undoHistory.length > 0) {
             e.preventDefault();
@@ -367,14 +370,10 @@ function initializeExtension() {
             // Save current state before modification
             const currentState = {
                 input: activeInput,
-                value: activeInput.isContentEditable ? activeInput.textContent : activeInput.value,
+                value: activeInput.value,
                 selection: {
-                    start: activeInput.isContentEditable ?
-                        window.getSelection().getRangeAt(0).startOffset :
-                        activeInput.selectionStart,
-                    end: activeInput.isContentEditable ?
-                        window.getSelection().getRangeAt(0).endOffset :
-                        activeInput.selectionEnd
+                    start: activeInput.selectionStart,
+                    end: activeInput.selectionEnd
                 }
             };
 
@@ -404,6 +403,57 @@ function initializeExtension() {
                     const newPosition = textBeforeCursor.length + (needsSpace ? 1 : 0) + currentSuggestion.length;
                     activeInput.selectionStart = activeInput.selectionEnd = newPosition;
                 }
+
+                // Save to undo history and show indicator
+                undoHistory.push(currentState);
+                if (undoHistory.length > MAX_UNDO_HISTORY) {
+                    undoHistory.shift();
+                }
+                showUndoIndicator('Ctrl+Z to undo');
+
+                // Trigger input event
+                activeInput.dispatchEvent(new Event('input', { bubbles: true }));
+                activeInput.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            // Handle YouTube search
+            else if (window.location.hostname === 'www.youtube.com' &&
+                (activeInput.matches('input[name="search_query"]') ||
+                    activeInput.matches('#search') ||
+                    activeInput.matches('.ytd-searchbox'))) {
+                const text = activeInput.value;
+                const cursorPosition = activeInput.selectionStart;
+                const textBeforeCursor = text.slice(0, cursorPosition);
+                const textAfterCursor = text.slice(cursorPosition);
+                const lastWord = textBeforeCursor.split(/\s+/).pop() || '';
+
+                const isCompletion = currentSuggestion.toLowerCase().startsWith(lastWord.toLowerCase()) &&
+                    currentSuggestion.toLowerCase() !== lastWord.toLowerCase();
+
+                if (isCompletion && lastWord) {
+                    // Replace only the last word before cursor
+                    const textWithoutLastWord = textBeforeCursor.slice(0, -lastWord.length);
+                    activeInput.value = textWithoutLastWord + currentSuggestion + textAfterCursor;
+                    activeInput.selectionStart = activeInput.selectionEnd =
+                        textWithoutLastWord.length + currentSuggestion.length;
+                } else {
+                    // Add suggestion at cursor position
+                    const needsSpace = !textBeforeCursor.endsWith(' ') && textBeforeCursor.length > 0;
+                    const newText = textBeforeCursor + (needsSpace ? ' ' : '') + currentSuggestion + textAfterCursor;
+                    activeInput.value = newText;
+                    const newPosition = textBeforeCursor.length + (needsSpace ? 1 : 0) + currentSuggestion.length;
+                    activeInput.selectionStart = activeInput.selectionEnd = newPosition;
+                }
+
+                // Save to undo history and show indicator
+                undoHistory.push(currentState);
+                if (undoHistory.length > MAX_UNDO_HISTORY) {
+                    undoHistory.shift();
+                }
+                showUndoIndicator('Ctrl+Z to undo');
+
+                // Trigger input event
+                activeInput.dispatchEvent(new Event('input', { bubbles: true }));
+                activeInput.dispatchEvent(new Event('change', { bubbles: true }));
             }
             // Handle Gmail compose editor
             else if (activeInput.isContentEditable) {
@@ -952,6 +1002,66 @@ function showSuggestion(suggestion, input) {
             suggestionSpan.appendChild(tabIndicator);
 
             // Update the base styles
+            suggestionSpan.style.cssText = `
+                position: fixed;
+                left: ${rect.left + totalOffset}px;
+                top: ${rect.top}px;
+                font: ${font || 'inherit'};
+                color: #666;
+                pointer-events: none;
+                white-space: pre;
+                z-index: 999999;
+                height: ${rect.height}px;
+                display: flex;
+                align-items: center;
+                gap: 4px;
+                background: transparent;
+            `;
+
+            document.body.appendChild(suggestionSpan);
+            return;
+        }
+
+        // Handle YouTube search field
+        if (window.location.hostname === 'www.youtube.com' &&
+            (input.matches('input[name="search_query"]') ||
+                input.matches('#search') ||
+                input.matches('.ytd-searchbox'))) {
+            const computedStyle = window.getComputedStyle(input);
+            rect = input.getBoundingClientRect();
+            font = computedStyle.font;
+
+            // More accurate text measurement
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            ctx.font = font;
+            const inputText = input.value || '';
+            textWidth = ctx.measureText(inputText).width;
+
+            // Adjust for YouTube search's layout
+            const searchIconWidth = 40;
+            const paddingLeft = parseFloat(computedStyle.paddingLeft) || 16;
+            const extraSpacing = 4;
+
+            const totalOffset = searchIconWidth + paddingLeft + textWidth + extraSpacing;
+
+            // Create suggestion with YouTube-specific styling
+            const suggestionSpan = document.createElement('span');
+            suggestionSpan.className = 'suggestion-span';
+
+            // Create tab indicator
+            const tabIndicator = document.createElement('span');
+            tabIndicator.className = 'tab-indicator';
+            tabIndicator.textContent = 'Tab';
+
+            // Create text span
+            const textSpan = document.createElement('span');
+            textSpan.textContent = suggestion;
+
+            // Add both elements
+            suggestionSpan.appendChild(textSpan);
+            suggestionSpan.appendChild(tabIndicator);
+
             suggestionSpan.style.cssText = `
                 position: fixed;
                 left: ${rect.left + totalOffset}px;
