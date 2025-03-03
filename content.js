@@ -150,6 +150,39 @@ function setValue(el, value) {
 let undoHistory = [];
 const MAX_UNDO_HISTORY = 10;
 
+// Add a flag to track when we're typing a suggestion
+let isTypingSuggestion = false;
+
+// Add a timestamp to track when we last updated a suggestion
+let lastSuggestionUpdateTime = 0;
+const SUGGESTION_COOLDOWN_MS = 3000; // Increase to 3 seconds for testing
+
+// Add a flag to track when we're updating a suggestion due to typing
+let isUpdatingSuggestion = false;
+
+// Add a flag to track when we're typing to match a suggestion
+let isTypingToMatchSuggestion = false;
+
+// Add a function to log debug info to the console
+function debugLog(message, data = {}) {
+    console.log(`%c[AI Autocomplete] ${message}`, 'color: #4285f4; font-weight: bold;', data);
+}
+
+// Update the isTypingCurrentSuggestion function to be more accurate
+function isTypingCurrentSuggestion(currentText, previousText, currentSuggestion) {
+    if (!currentSuggestion || !previousText) return false;
+
+    // If text got shorter, user is deleting, not typing the suggestion
+    if (currentText.length < previousText.length) return false;
+
+    // Get the new characters typed
+    const newChars = currentText.slice(previousText.length);
+
+    // Check if the new characters match the beginning of the suggestion
+    const suggestionStart = currentSuggestion.slice(0, newChars.length);
+    return suggestionStart.toLowerCase() === newChars.toLowerCase();
+}
+
 function initializeExtension() {
     let activeInput = null;
     let currentSuggestion = null;
@@ -281,254 +314,355 @@ function initializeExtension() {
         }
     }
 
-    // Update input handler for contenteditable
+    // Add a new function to update suggestion text without removing it
+    function updateSuggestionText(suggestion, input) {
+        if (!suggestion || !input) return;
+
+        try {
+            // Check if there's an existing suggestion
+            let suggestionSpan = document.querySelector('.suggestion-span');
+
+            if (suggestionSpan) {
+                // Find the text span
+                const textSpan = suggestionSpan.querySelector('span:first-child');
+                if (textSpan) {
+                    // Just update the text content
+                    textSpan.textContent = suggestion;
+
+                    // Update position
+                    const rect = input.getBoundingClientRect();
+                    const computedStyle = window.getComputedStyle(input);
+
+                    // For regular input fields like Google search
+                    const inputValue = input.value || getValue(input);
+
+                    // Measure text width
+                    const canvas = document.createElement('canvas');
+                    const context = canvas.getContext('2d');
+                    context.font = computedStyle.font;
+                    const textWidth = context.measureText(inputValue).width;
+
+                    // Calculate position
+                    let leftPosition = rect.left + parseFloat(computedStyle.paddingLeft || 0) + textWidth;
+
+                    // Special handling for Google search
+                    if (window.location.hostname.includes('google') &&
+                        input.matches('input[name="q"], .gLFyf')) {
+                        leftPosition += 2; // Add a small offset for cursor width
+                    }
+
+                    // Update position
+                    suggestionSpan.style.left = `${leftPosition}px`;
+
+                    return true; // Successfully updated
+                }
+            }
+
+            return false; // Couldn't update
+        } catch (error) {
+            console.error('Error updating suggestion text:', error);
+            return false;
+        }
+    }
+
+    // Completely rewrite the handleKeyDown function to fix the Tab key behavior
+    function handleKeyDown(e) {
+        // Only handle Tab key with a suggestion
+        if (e.key === 'Tab' && currentSuggestion && activeInput) {
+            e.preventDefault(); // Always prevent default Tab behavior
+
+            // Get current text
+            const currentText = getValue(activeInput);
+
+            // Get the last word the user is typing
+            const lastWord = currentText.split(/\s+/).pop() || '';
+
+            console.log('Tab pressed with suggestion:', {
+                currentText,
+                lastWord,
+                currentSuggestion,
+                isTypingToMatchSuggestion
+            });
+
+            // Remove any suggestion display
+            const suggestionSpan = document.querySelector('.suggestion-span');
+            if (suggestionSpan) suggestionSpan.remove();
+
+            // Determine what text to insert
+            let textToInsert = currentSuggestion;
+            let newValue;
+
+            // If the last word is a partial match of the suggestion
+            if (lastWord && lastWord.length > 0) {
+                const suggestionLower = currentSuggestion.toLowerCase();
+                const lastWordLower = lastWord.toLowerCase();
+
+                // Check if the suggestion starts with the last word
+                if (suggestionLower.startsWith(lastWordLower)) {
+                    console.log('Partial match detected');
+
+                    // Only insert the remaining part of the suggestion
+                    textToInsert = currentSuggestion.substring(lastWord.length);
+                    console.log('Text to insert:', textToInsert);
+
+                    // If we're in the middle of a word, we need to handle it differently
+                    if (lastWord !== currentText) {
+                        // Get the text before the last word
+                        const textBeforeLastWord = currentText.substring(0, currentText.length - lastWord.length);
+                        newValue = textBeforeLastWord + lastWord + textToInsert;
+                    } else {
+                        newValue = currentText + textToInsert;
+                    }
+                } else {
+                    // If the suggestion doesn't start with the last word,
+                    // just add the full suggestion
+                    newValue = currentText + textToInsert;
+                }
+            } else {
+                // No partial word, just add the full suggestion
+                newValue = currentText + textToInsert;
+            }
+
+            console.log('Final value to set:', newValue);
+
+            // For contenteditable elements
+            if (activeInput.isContentEditable) {
+                document.execCommand('insertText', false, textToInsert);
+            } else {
+                // For input elements, set the value directly
+                activeInput.value = newValue;
+
+                // Dispatch input event
+                const inputEvent = new Event('input', { bubbles: true });
+                activeInput.dispatchEvent(inputEvent);
+
+                // Also dispatch change event
+                const changeEvent = new Event('change', { bubbles: true });
+                activeInput.dispatchEvent(changeEvent);
+            }
+
+            // Add to undo history
+            if (undoHistory.length >= MAX_UNDO_HISTORY) {
+                undoHistory.shift();
+            }
+            undoHistory.push({
+                input: activeInput,
+                before: currentText,
+                after: newValue
+            });
+
+            // Reset suggestion state
+            currentSuggestion = null;
+            isTypingToMatchSuggestion = false;
+            lastSuggestionUpdateTime = Date.now();
+
+            return;
+        }
+
+        // Handle Ctrl+Z or Cmd+Z for undo
+        if ((e.ctrlKey || e.metaKey) && e.key === 'z' && undoHistory.length > 0) {
+            const lastUndo = undoHistory.pop();
+            if (lastUndo.input === activeInput) {
+                setValue(activeInput, lastUndo.before);
+
+                // Dispatch input event
+                const inputEvent = new Event('input', { bubbles: true });
+                activeInput.dispatchEvent(inputEvent);
+
+                e.preventDefault();
+            }
+        }
+    }
+
+    // Completely rewrite handleInput to combine typing pause with suggestion matching
     function handleInput(e) {
         if (!activeInput) return;
 
-        // Clear existing suggestion and loading indicator
-        const suggestionSpan = document.querySelector('.suggestion-span');
-        const loadingSpan = document.querySelector('.suggestion-loading');
-        if (suggestionSpan) suggestionSpan.remove();
-        if (loadingSpan) loadingSpan.remove();
-        currentSuggestion = null;
+        // Get current text
+        const currentText = getValue(activeInput);
+
+        // Check if backspace was pressed (text is shorter than before)
+        const isBackspace = lastInputText && currentText.length < lastInputText.length;
+
+        console.log('Input event:', {
+            currentText,
+            lastInputText,
+            currentSuggestion,
+            isBackspace,
+            isTypingToMatchSuggestion
+        });
+
+        // Clear previous timeout to prevent multiple requests
+        if (debounceTimeout) {
+            clearTimeout(debounceTimeout);
+            debounceTimeout = null;
+        }
+
+        // PART 1: HANDLE SUGGESTION MATCHING
+        // Check if we have an active suggestion and the user is typing
+        if (currentSuggestion && lastInputText) {
+            // If backspace was pressed
+            if (isBackspace) {
+                // Get the last word the user is typing
+                const lastWord = currentText.split(/\s+/).pop() || '';
+
+                // Check if the user was typing to match a suggestion and is still matching
+                if (isTypingToMatchSuggestion && lastWord.length > 0) {
+                    const fullSuggestion = lastInputText + currentSuggestion;
+
+                    // Check if the full suggestion still starts with the current text
+                    if (fullSuggestion.toLowerCase().startsWith(currentText.toLowerCase())) {
+                        console.log('Still matching suggestion after backspace');
+
+                        // Update the suggestion to show the remaining part
+                        const remainingSuggestion = fullSuggestion.substring(currentText.length);
+
+                        // Update the suggestion
+                        currentSuggestion = remainingSuggestion;
+
+                        // Show the updated suggestion
+                        showSuggestion(remainingSuggestion, activeInput);
+
+                        // Update timestamp and last input text
+                        lastSuggestionUpdateTime = Date.now();
+                        lastInputText = currentText;
+
+                        return;
+                    }
+                }
+
+                // If we get here, clear the suggestion
+                console.log('No longer matching suggestion, clearing');
+                currentSuggestion = null;
+                isTypingToMatchSuggestion = false;
+
+                // Remove any suggestion display
+                const suggestionSpan = document.querySelector('.suggestion-span');
+                if (suggestionSpan) suggestionSpan.remove();
+            }
+            // If text is longer (user typed something)
+            else if (currentText.length > lastInputText.length) {
+                // Check if the user is typing to match the suggestion
+                const fullSuggestion = lastInputText + currentSuggestion;
+
+                // Get what was newly typed
+                const newlyTyped = currentText.substring(lastInputText.length);
+
+                // Special handling for Gmail search overlap
+                const isGmailSearch = window.location.hostname.includes('mail.google.com') &&
+                    (activeInput.getAttribute('placeholder')?.includes('Search') ||
+                        activeInput.getAttribute('aria-label')?.includes('Search') ||
+                        activeInput.matches('[role="searchbox"]') ||
+                        activeInput.closest('[role="search"]'));
+
+                // For Gmail search, always check for overlap
+                if (isGmailSearch) {
+                    console.log('Gmail search detected - checking for overlap');
+                    console.log('Current suggestion:', currentSuggestion);
+                    console.log('Newly typed:', newlyTyped);
+
+                    // If there's any overlap between what was typed and the suggestion
+                    if (currentSuggestion.toLowerCase().startsWith(newlyTyped.toLowerCase())) {
+                        console.log('Overlap detected in Gmail search');
+
+                        // Remove the overlap from the suggestion
+                        const adjustedSuggestion = currentSuggestion.substring(newlyTyped.length);
+                        currentSuggestion = adjustedSuggestion;
+
+                        console.log('Adjusted suggestion:', currentSuggestion);
+                    }
+                }
+
+                // Check if the full suggestion starts with the current text
+                if (fullSuggestion.toLowerCase().startsWith(currentText.toLowerCase())) {
+                    console.log('User is typing to match suggestion');
+
+                    // Calculate the remaining part of the suggestion
+                    const remainingSuggestion = fullSuggestion.substring(currentText.length);
+
+                    // Update the suggestion
+                    currentSuggestion = remainingSuggestion;
+                    isTypingToMatchSuggestion = true;
+
+                    // Show the updated suggestion
+                    showSuggestion(remainingSuggestion, activeInput);
+
+                    // Update timestamp and last input text
+                    lastSuggestionUpdateTime = Date.now();
+                    lastInputText = currentText;
+
+                    return;
+                } else {
+                    // User typed something that doesn't match the suggestion
+                    console.log('User typed something that doesn\'t match suggestion');
+                    currentSuggestion = null;
+                    isTypingToMatchSuggestion = false;
+
+                    // Remove any suggestion display
+                    const suggestionSpan = document.querySelector('.suggestion-span');
+                    if (suggestionSpan) suggestionSpan.remove();
+                }
+            }
+        }
+
+        // PART 2: HANDLE NEW SUGGESTIONS AFTER TYPING PAUSE
+
+        // Update last input text
+        lastInputText = currentText;
 
         // Cancel any pending request
         if (lastRequestController) {
             lastRequestController.abort();
+            lastRequestController = null;
         }
 
-        // Clear previous timeout
-        if (debounceTimeout) {
-            clearTimeout(debounceTimeout);
-        }
+        // Only set a new timeout if the text isn't empty and meets minimum length
+        if (currentText.trim().length >= 2) {
+            // Set a longer timeout to wait for typing to pause
+            const TYPING_PAUSE_MS = 1000; // Wait 1 second after typing stops
 
-        debounceTimeout = setTimeout(async () => {
-            const text = getValue(activeInput);
-            lastInputText = text;
-
-            if (text.length < 2) return;
-
-            try {
-                // Show loading indicator
-                showLoadingIndicator(activeInput);
-
-                // Create new controller for this request
-                lastRequestController = new AbortController();
-
-                const suggestion = await getAISuggestion(text, lastRequestController.signal);
-
-                // Remove loading indicator
-                const loadingSpan = document.querySelector('.suggestion-loading');
-                if (loadingSpan) loadingSpan.remove();
-
-                // Only show suggestion if the input hasn't changed and we still have focus
-                if (suggestion &&
-                    lastInputText === text &&
-                    document.activeElement === activeInput) {
-                    currentSuggestion = suggestion;
-                    showSuggestion(suggestion, activeInput);
-                }
-            } catch (error) {
-                // Remove loading indicator on error
-                const loadingSpan = document.querySelector('.suggestion-loading');
-                if (loadingSpan) loadingSpan.remove();
-
-                if (error.name !== 'AbortError') {
-                    console.error('Error getting suggestion:', error);
-                }
-            }
-        }, DEBOUNCE_MS);
-    }
-
-    // Update handleKeyDown function to handle both Google and YouTube search
-    function handleKeyDown(e) {
-        if ((e.ctrlKey || e.metaKey) && e.key === 'z' && undoHistory.length > 0) {
-            e.preventDefault();
-            e.stopPropagation();
-
-            const lastState = undoHistory.pop();
-            if (lastState) {
-                const { input, value, selection } = lastState;
-                input.value = value;
-                input.selectionStart = selection.start;
-                input.selectionEnd = selection.end;
-                input.dispatchEvent(new Event('input', { bubbles: true }));
-                showUndoIndicator('Last suggestion undone');
-            }
-            return;
-        }
-
-        if (e.key === 'Tab' && currentSuggestion && activeInput) {
-            e.preventDefault();
-            e.stopPropagation();
-
-            const suggestionSpan = document.querySelector('.suggestion-span');
-            if (suggestionSpan) {
-                suggestionSpan.remove();
-            }
-
-            // Save current state before modification
-            const currentState = {
-                input: activeInput,
-                value: activeInput.value,
-                selection: {
-                    start: activeInput.selectionStart,
-                    end: activeInput.selectionEnd
-                }
-            };
-
-            // Handle Google search
-            if (window.location.hostname.includes('google') &&
-                activeInput.matches('input[name="q"], .gLFyf')) {
-                const text = activeInput.value;
-                const cursorPosition = activeInput.selectionStart;
-                const textBeforeCursor = text.slice(0, cursorPosition);
-                const textAfterCursor = text.slice(cursorPosition);
-                const lastWord = textBeforeCursor.split(/\s+/).pop() || '';
-
-                const isCompletion = currentSuggestion.toLowerCase().startsWith(lastWord.toLowerCase()) &&
-                    currentSuggestion.toLowerCase() !== lastWord.toLowerCase();
-
-                if (isCompletion && lastWord) {
-                    // Replace only the last word before cursor
-                    const textWithoutLastWord = textBeforeCursor.slice(0, -lastWord.length);
-                    activeInput.value = textWithoutLastWord + currentSuggestion + textAfterCursor;
-                    activeInput.selectionStart = activeInput.selectionEnd =
-                        textWithoutLastWord.length + currentSuggestion.length;
-                } else {
-                    // Add suggestion at cursor position
-                    const needsSpace = !textBeforeCursor.endsWith(' ') && textBeforeCursor.length > 0;
-                    const newText = textBeforeCursor + (needsSpace ? ' ' : '') + currentSuggestion + textAfterCursor;
-                    activeInput.value = newText;
-                    const newPosition = textBeforeCursor.length + (needsSpace ? 1 : 0) + currentSuggestion.length;
-                    activeInput.selectionStart = activeInput.selectionEnd = newPosition;
+            debounceTimeout = setTimeout(async () => {
+                // Check if we're within the cooldown period after typing a suggestion
+                if (Date.now() - lastSuggestionUpdateTime < SUGGESTION_COOLDOWN_MS) {
+                    console.log('Skipping request - within suggestion cooldown period');
+                    return;
                 }
 
-                // Save to undo history and show indicator
-                undoHistory.push(currentState);
-                if (undoHistory.length > MAX_UNDO_HISTORY) {
-                    undoHistory.shift();
+                // Double-check that the text hasn't changed during the timeout
+                if (currentText !== getValue(activeInput)) return;
+
+                try {
+                    // Show loading indicator
+                    showLoadingIndicator(activeInput);
+
+                    // Create new controller for this request
+                    lastRequestController = new AbortController();
+
+                    const suggestion = await getAISuggestion(currentText, lastRequestController.signal);
+
+                    // Remove loading indicator
+                    const loadingSpan = document.querySelector('.suggestion-loading');
+                    if (loadingSpan) loadingSpan.remove();
+
+                    // Only show suggestion if the input hasn't changed and we still have focus
+                    if (suggestion &&
+                        currentText === getValue(activeInput) &&
+                        document.activeElement === activeInput) {
+                        currentSuggestion = suggestion;
+                        showSuggestion(suggestion, activeInput);
+                        lastSuggestionUpdateTime = Date.now();
+                        isTypingToMatchSuggestion = false;
+                    }
+                } catch (error) {
+                    // Remove loading indicator on error
+                    const loadingSpan = document.querySelector('.suggestion-loading');
+                    if (loadingSpan) loadingSpan.remove();
+
+                    if (error.name !== 'AbortError') {
+                        console.error('Error getting suggestion:', error);
+                    }
                 }
-                showUndoIndicator('Ctrl+Z to undo');
-
-                // Trigger input event
-                activeInput.dispatchEvent(new Event('input', { bubbles: true }));
-                activeInput.dispatchEvent(new Event('change', { bubbles: true }));
-            }
-            // Handle YouTube search
-            else if (window.location.hostname === 'www.youtube.com' &&
-                (activeInput.matches('input[name="search_query"]') ||
-                    activeInput.matches('#search') ||
-                    activeInput.matches('.ytd-searchbox'))) {
-                const text = activeInput.value;
-                const cursorPosition = activeInput.selectionStart;
-                const textBeforeCursor = text.slice(0, cursorPosition);
-                const textAfterCursor = text.slice(cursorPosition);
-                const lastWord = textBeforeCursor.split(/\s+/).pop() || '';
-
-                const isCompletion = currentSuggestion.toLowerCase().startsWith(lastWord.toLowerCase()) &&
-                    currentSuggestion.toLowerCase() !== lastWord.toLowerCase();
-
-                if (isCompletion && lastWord) {
-                    // Replace only the last word before cursor
-                    const textWithoutLastWord = textBeforeCursor.slice(0, -lastWord.length);
-                    activeInput.value = textWithoutLastWord + currentSuggestion + textAfterCursor;
-                    activeInput.selectionStart = activeInput.selectionEnd =
-                        textWithoutLastWord.length + currentSuggestion.length;
-                } else {
-                    // Add suggestion at cursor position
-                    const needsSpace = !textBeforeCursor.endsWith(' ') && textBeforeCursor.length > 0;
-                    const newText = textBeforeCursor + (needsSpace ? ' ' : '') + currentSuggestion + textAfterCursor;
-                    activeInput.value = newText;
-                    const newPosition = textBeforeCursor.length + (needsSpace ? 1 : 0) + currentSuggestion.length;
-                    activeInput.selectionStart = activeInput.selectionEnd = newPosition;
-                }
-
-                // Save to undo history and show indicator
-                undoHistory.push(currentState);
-                if (undoHistory.length > MAX_UNDO_HISTORY) {
-                    undoHistory.shift();
-                }
-                showUndoIndicator('Ctrl+Z to undo');
-
-                // Trigger input event
-                activeInput.dispatchEvent(new Event('input', { bubbles: true }));
-                activeInput.dispatchEvent(new Event('change', { bubbles: true }));
-            }
-            // Handle Gmail compose editor
-            else if (activeInput.isContentEditable) {
-                const selection = window.getSelection();
-                if (!selection.rangeCount) return;
-
-                const range = selection.getRangeAt(0);
-                const container = range.startContainer;
-                const offset = range.startOffset;
-
-                // Get text before cursor
-                let textBeforeCursor = '';
-                if (container.nodeType === Node.TEXT_NODE) {
-                    textBeforeCursor = container.textContent.slice(0, offset);
-                }
-                const lastWord = textBeforeCursor.split(/\s+/).pop() || '';
-
-                const isCompletion = currentSuggestion.toLowerCase().startsWith(lastWord.toLowerCase()) &&
-                    currentSuggestion.toLowerCase() !== lastWord.toLowerCase();
-
-                if (isCompletion && lastWord) {
-                    // Delete the partial word
-                    range.setStart(container, offset - lastWord.length);
-                    range.deleteContents();
-                }
-
-                // Insert the suggestion
-                const needsSpace = !isCompletion && !textBeforeCursor.endsWith(' ') && textBeforeCursor.length > 0;
-                const textNode = document.createTextNode((needsSpace ? ' ' : '') + currentSuggestion);
-                range.insertNode(textNode);
-
-                // Move cursor to end
-                range.setStartAfter(textNode);
-                range.setEndAfter(textNode);
-                selection.removeAllRanges();
-                selection.addRange(range);
-            }
-            // Handle Gmail search field
-            else if (window.location.hostname === 'mail.google.com' &&
-                (activeInput.matches('[role="searchbox"]') || activeInput.matches('[aria-label*="Search"]'))) {
-                const text = activeInput.value;
-                const cursorPosition = activeInput.selectionStart;
-                const textBeforeCursor = text.slice(0, cursorPosition);
-                const textAfterCursor = text.slice(cursorPosition);
-                const lastWord = textBeforeCursor.split(/\s+/).pop() || '';
-
-                const isCompletion = currentSuggestion.toLowerCase().startsWith(lastWord.toLowerCase()) &&
-                    currentSuggestion.toLowerCase() !== lastWord.toLowerCase();
-
-                if (isCompletion && lastWord) {
-                    // Replace only the last word before cursor
-                    const textWithoutLastWord = textBeforeCursor.slice(0, -lastWord.length);
-                    activeInput.value = textWithoutLastWord + currentSuggestion + textAfterCursor;
-                    activeInput.selectionStart = activeInput.selectionEnd =
-                        textWithoutLastWord.length + currentSuggestion.length;
-                } else {
-                    // Add suggestion at cursor position
-                    const needsSpace = !textBeforeCursor.endsWith(' ') && textBeforeCursor.length > 0;
-                    const newText = textBeforeCursor + (needsSpace ? ' ' : '') + currentSuggestion + textAfterCursor;
-                    activeInput.value = newText;
-                    const newPosition = textBeforeCursor.length + (needsSpace ? 1 : 0) + currentSuggestion.length;
-                    activeInput.selectionStart = activeInput.selectionEnd = newPosition;
-                }
-            }
-
-            // Save to undo history and show indicator
-            undoHistory.push(currentState);
-            if (undoHistory.length > MAX_UNDO_HISTORY) {
-                undoHistory.shift();
-            }
-            showUndoIndicator('Ctrl+Z to undo');
-
-            // Trigger input event
-            activeInput.dispatchEvent(new Event('input', { bubbles: true }));
-            currentSuggestion = null;
+            }, TYPING_PAUSE_MS);
         }
     }
 
@@ -677,66 +811,174 @@ function initializeExtension() {
     }, true); // Use capture phase to handle event before Gmail's handlers
 }
 
+// Add a function to extract page context
+function getPageContext() {
+    try {
+        // Get page title
+        const pageTitle = document.title || '';
+
+        // Get meta description
+        const metaDescription = document.querySelector('meta[name="description"]')?.content || '';
+
+        // Get current URL
+        const currentUrl = window.location.href;
+
+        // Get visible text from the page (limited to avoid token overuse)
+        let visibleText = '';
+
+        // First try to get text from main content areas
+        const mainContent = document.querySelector('main, article, #content, .content, [role="main"]');
+        if (mainContent) {
+            visibleText = mainContent.innerText.slice(0, 500);
+        } else {
+            // Fallback to getting text from the body
+            const bodyText = document.body.innerText;
+            visibleText = bodyText.slice(0, 500);
+        }
+
+        // Combine the context
+        const pageContext = {
+            title: pageTitle,
+            description: metaDescription,
+            url: currentUrl,
+            visibleText: visibleText
+        };
+
+        return pageContext;
+    } catch (error) {
+        console.error('Error getting page context:', error);
+        return {
+            title: document.title || '',
+            url: window.location.href
+        };
+    }
+}
+
+// Update the getAISuggestion function to fix the Google API implementation
 async function getAISuggestion(text, signal) {
     try {
-        if (!text) {
-            console.log('Empty text, skipping suggestion');
-            return null;
-        }
+        // Get API settings from storage
+        const settings = await new Promise(resolve => {
+            chrome.storage.sync.get([
+                'apiProvider',
+                'openrouterKey',
+                'groqKey',
+                'googleKey',
+                'openrouterModel',
+                'groqModel'
+            ], resolve);
+        });
 
-        const activeKey = {
-            'openrouter': OPENROUTER_API_KEY,
-            'groq': GROQ_API_KEY,
-            'google': GOOGLE_API_KEY
-        }[API_PROVIDER];
+        // Default to OpenRouter if no provider is set
+        const API_PROVIDER = settings.apiProvider || 'openrouter';
 
-        if (!activeKey) {
-            console.error('No API key set. Please configure in extension settings.');
-            return null;
-        }
+        // Get API keys
+        const OPENROUTER_API_KEY = settings.openrouterKey || '';
+        const GROQ_API_KEY = settings.groqKey || '';
+        const GOOGLE_API_KEY = settings.googleKey || '';
 
-        console.log('Making API request for text:', text);
+        // Get models
+        const OPENROUTER_MODEL = settings.openrouterModel || 'deepseek/deepseek-r1:free';
+        const GROQ_MODEL = settings.groqModel || 'mixtral-8x7b-32768';
 
-        const endpoint = {
-            'openrouter': 'https://openrouter.ai/api/v1/chat/completions',
-            'groq': 'https://api.groq.com/openai/v1/chat/completions',
-            'google': `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GOOGLE_API_KEY}`
-        }[API_PROVIDER];
+        // Get the current page context
+        const pageContext = getPageContext();
 
-        const headers = {
-            'openrouter': {
-                'Authorization': `Bearer ${activeKey}`,
+        let apiUrl, headers, body, model;
+
+        if (API_PROVIDER === 'openrouter') {
+            apiUrl = 'https://openrouter.ai/api/v1/chat/completions';
+            model = OPENROUTER_MODEL;
+            headers = {
                 'Content-Type': 'application/json',
-                'Origin': 'https://openrouter.ai',
-                'Referer': 'https://openrouter.ai/',
-                'HTTP-Referer': 'https://openrouter.ai/'
-            },
-            'groq': {
-                'Authorization': `Bearer ${activeKey}`,
-                'Content-Type': 'application/json'
-            },
-            'google': {
-                'Content-Type': 'application/json'
-            }
-        }[API_PROVIDER];
+                'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+                'HTTP-Referer': 'https://github.com/yourusername/ai-autocomplete',
+                'X-Title': 'AI Autocomplete Extension'
+            };
 
-        const model = {
-            'openrouter': OPENROUTER_MODEL,
-            'groq': GROQ_MODEL,
-            'google': 'gemini-1.5-flash' // Fixed to Gemini 1.5 Flash
-        }[API_PROVIDER];
+            body = JSON.stringify({
+                model: model,
+                messages: [
+                    {
+                        role: 'system',
+                        content: `You are an autocomplete assistant. Your task is to predict the next few words that would naturally complete the user's text.
 
-        let body;
-        if (API_PROVIDER === 'google') {
-            const lastWord = text.split(/\s+/).pop() || '';
-            const isPartialWord = !text.endsWith(' ');
+IMPORTANT RULES:
+1. ONLY provide the exact completion text - no quotes, no explanations, no labels
+2. Suggest ONLY 1-3 words that directly continue the input text
+3. Never repeat words from the input
+4. For partial words, complete only that word
+5. Keep suggestions contextually relevant to the page the user is viewing
+
+Current page context:
+Title: ${pageContext.title}
+URL: ${pageContext.url}
+Description: ${pageContext.description}
+Content: ${pageContext.visibleText.substring(0, 200)}`
+                    },
+                    {
+                        role: 'user',
+                        content: `Complete this text (ONLY provide the completion, nothing else): "${text}"`
+                    }
+                ],
+                max_tokens: 20,
+                temperature: 0.1,
+                top_p: 0.3
+            });
+        } else if (API_PROVIDER === 'groq') {
+            apiUrl = 'https://api.groq.com/openai/v1/chat/completions';
+            model = GROQ_MODEL;
+            headers = {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${GROQ_API_KEY}`
+            };
+
+            body = JSON.stringify({
+                model,
+                messages: [
+                    {
+                        role: 'system',
+                        content: `You are an autocomplete assistant. Your task is to predict the next few words that would naturally complete the user's text.
+
+IMPORTANT RULES:
+1. ONLY provide the exact completion text - no quotes, no explanations, no labels
+2. Suggest ONLY 1-3 words that directly continue the input text
+3. Never repeat words from the input
+4. For partial words, complete only that word
+5. Keep suggestions contextually relevant to the page the user is viewing
+
+Current page context:
+Title: ${pageContext.title}
+URL: ${pageContext.url}
+Description: ${pageContext.description}
+Content: ${pageContext.visibleText.substring(0, 200)}`
+                    },
+                    {
+                        role: 'user',
+                        content: `Complete this text (ONLY provide the completion, nothing else): "${text}"`
+                    }
+                ],
+                max_tokens: 20,
+                temperature: 0.1,
+                top_p: 0.2,
+                frequency_penalty: 0.3,
+                presence_penalty: 0.3
+            });
+        } else if (API_PROVIDER === 'google') {
+            apiUrl = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent';
+            headers = {
+                'Content-Type': 'application/json'
+            };
 
             body = JSON.stringify({
                 contents: [{
+                    role: "user",
                     parts: [{
-                        text: isPartialWord ?
-                            `Complete this business-related word (only return the completion part): "${lastWord}"` :
-                            `Suggest what comes next in a business context (1-3 new words only): "${text}". Focus on factual business descriptions.`
+                        text: `You are an autocomplete assistant. Complete this text with 1-3 words (ONLY provide the exact completion, no explanations): "${text}"
+
+Current page context:
+Title: ${pageContext.title}
+URL: ${pageContext.url}`
                     }]
                 }],
                 safetySettings: [{
@@ -744,415 +986,293 @@ async function getAISuggestion(text, signal) {
                     threshold: "BLOCK_NONE"
                 }],
                 generationConfig: {
-                    temperature: 0.1, // Lower temperature for more focused suggestions
+                    temperature: 0.1,
                     maxOutputTokens: 20,
-                    topP: 0.3, // Lower top_p for more focused suggestions
+                    topP: 0.3,
                     topK: 10
                 }
             });
-        } else if (API_PROVIDER === 'groq') {
-            body = JSON.stringify({
-                model,
-                messages: [
-                    {
-                        role: 'system',
-                        content: `You are a business-focused autocomplete assistant. Your task is to predict the next few words that would naturally complete business-related descriptions.
 
-Rules:
-1. Only suggest 1-3 words that directly continue the input text
-2. Focus on factual, business-appropriate completions
-3. Never repeat words from the input
-4. Keep suggestions professional and contextual
-5. No explanations or labels, just the completion
-6. For partial words, complete only that word
-7. For company descriptions, focus on their products, services, or industry position
-
-Examples:
-Input: "Microsoft is a company that" → develops software solutions
-Input: "Apple focuses on" → consumer electronics innovation
-Input: "Tesla manufactures" → electric vehicles and
-Input: "Amazon provides" → cloud computing services
-Input: "The business strategy" → focuses on growth`
-                    },
-                    {
-                        role: 'user',
-                        content: text
-                    }
-                ],
-                max_tokens: 20,
-                temperature: 0.1,     // Very low temperature for focused suggestions
-                top_p: 0.2,          // Even lower top_p for more predictable completions
-                frequency_penalty: 0.3,
-                presence_penalty: 0.3
-            });
+            // Add API key as query parameter
+            apiUrl += `?key=${GOOGLE_API_KEY}`;
         } else {
-            body = JSON.stringify({
-                model,
-                messages: [
-                    {
-                        role: 'system',
-                        content: `You are an autocomplete assistant. Follow these rules strictly:
-1. If input ends with a partial word, complete that word naturally in the context
-2. If input ends with a complete word or space, suggest the next 1-3 words that make sense in context
-3. Never repeat words that are already in the input
-4. Only provide the raw completion/suggestion - no labels or explanations
-5. Keep suggestions concise and natural
-6. Never output more than 3 words
-7. Suggestions must make grammatical sense in the context
-8. For partial words, complete them based on the full context, not just the last word
-
-Examples:
-Input: "I need to fi" → find
-Input: "I need to" → get started with
-Input: "The weather is" → very nice today
-Input: "google translate is a search engine that" → helps users translate
-Input: "google is a company that" → provides search services`
-                    },
-                    {
-                        role: 'user',
-                        content: text
-                    }
-                ],
-                max_tokens: 50,
-                temperature: 0.3
-            });
+            throw new Error('Invalid API provider');
         }
 
-        const response = await fetch(endpoint, {
+        const response = await fetch(apiUrl, {
             method: 'POST',
-            signal,
-            headers,
-            body
+            headers: headers,
+            body: body,
+            signal: signal
         });
 
         if (!response.ok) {
-            console.error('API Response not OK:', response.status);
-            return null;
+            const errorText = await response.text();
+            throw new Error(`API request failed: ${response.status} ${errorText}`);
         }
 
-        let data;
-        try {
-            data = await response.json();
-        } catch (parseError) {
-            console.error('Failed to parse API response:', parseError);
-            return null;
-        }
+        const data = await response.json();
 
-        // More detailed error logging
-        if (!data) {
-            console.error('Empty response data');
-            return null;
-        }
+        let suggestion = '';
 
-        if (data.error) {
-            console.error('API returned error:', data.error);
-            return null;
-        }
-
-        let suggestion;
-        if (API_PROVIDER === 'google') {
-            if (!data.candidates || !Array.isArray(data.candidates) || data.candidates.length === 0) {
-                console.error('No candidates in response:', data);
-                return null;
-            }
-
-            const candidate = data.candidates[0];
-            if (!candidate || !candidate.content || !candidate.content.parts || !candidate.content.parts[0]) {
-                console.error('Invalid candidate structure:', candidate);
-                return null;
-            }
-
-            let completionText = candidate.content.parts[0].text;
-
-            // Get the last word of input to help with separation
-            const lastWord = text.split(/\s+/).pop() || '';
-            const isPartialWord = !text.endsWith(' ');
-
-            // Clean up the response
-            completionText = completionText
-                .replace(/^.*?["']/, '') // Remove everything up to first quote
-                .replace(/["'].*$/, '') // Remove everything after last quote
-                .replace(/^[.,!?]\s*/, '') // Remove leading punctuation
-                .replace(/\s*[.,!?]\s*$/, '') // Remove trailing punctuation
-                .trim();
-
-            if (isPartialWord) {
-                // For partial words, only return the completion part
-                completionText = completionText
-                    .split(/\s+/)[0] // Take only first word
-                    .replace(new RegExp(`^${lastWord}`, 'i'), '') // Remove any repeated part
-                    .replace(/^[.,!?]\s*/, '') // Clean up again after removal
-                    .trim();
+        if (API_PROVIDER === 'openrouter' || API_PROVIDER === 'groq') {
+            suggestion = data.choices[0].message.content.trim();
+        } else if (API_PROVIDER === 'google') {
+            if (data.candidates && data.candidates.length > 0 &&
+                data.candidates[0].content && data.candidates[0].content.parts &&
+                data.candidates[0].content.parts.length > 0) {
+                suggestion = data.candidates[0].content.parts[0].text.trim();
             } else {
-                // For full words, ensure we're only getting new words
-                const inputWords = text.toLowerCase().split(/\s+/);
-                completionText = completionText
-                    .split(/\s+/)
-                    .filter(word => !inputWords.includes(word.toLowerCase())) // Remove any words from input
-                    .slice(0, 3) // Keep max 3 words
-                    .join(' ')
-                    .trim();
-
-                // Add leading space for full word completions
-                if (completionText) {
-                    completionText = ' ' + completionText;
-                }
-            }
-
-            suggestion = completionText;
-        } else {
-            // OpenRouter and Groq handling
-            if (!data.choices || !Array.isArray(data.choices) || data.choices.length === 0) {
-                console.error('Invalid choices in response:', data);
+                console.log('Unexpected Google API response format:', data);
                 return null;
             }
-
-            const choice = data.choices[0];
-            if (!choice || !choice.message || !choice.message.content) {
-                console.error('Invalid choice structure:', choice);
-                return null;
-            }
-
-            suggestion = choice.message.content.trim();
         }
 
+        // Aggressive cleaning of the suggestion
+        suggestion = suggestion
+            // Remove quotes, brackets and other common delimiters
+            .replace(/^["'`\[\(\{]+|["'`\]\)\}]+$/g, '')
+            // Remove common prefixes that models tend to add
+            .replace(/^(I would suggest|I suggest|Suggestion:|Here's a suggestion:|Next words:|Completion:|The next words could be:|The completion is:|The text continues with:|Continuing:|Completed text:|Autocomplete:|Predicted text:|Next:|Suggestion would be:|Possible completion:|Recommended completion:)/i, '')
+            // Remove any "quotes" or similar text
+            .replace(/(^|\s)["']([^"']*)["'](\s|$)/g, '$1$2$3')
+            // Remove any explanations in parentheses or brackets
+            .replace(/\s*[\(\[\{].*?[\)\]\}]\s*/g, ' ')
+            // Remove any text after a period, comma, semicolon, or colon if it looks like an explanation
+            .replace(/[.,;:].*$/g, '')
+            // Limit to 3 words maximum
+            .split(/\s+/).slice(0, 3).join(' ')
+            // Final trim of whitespace and punctuation
+            .replace(/^[\s.,;:!?]+|[\s.,;:!?]+$/g, '');
+
+        // If the suggestion is empty after cleaning, return null
         if (!suggestion) {
-            console.log('Empty suggestion received');
             return null;
         }
 
-        // More aggressive cleaning to remove any prefixes and keep only the actual suggestion
-        return suggestion
-            .split('\n')[0] // Take only first line
-            .replace(/^["']|["']$/g, '') // Remove quotes
-            .replace(/^[.,!?]\s*/, '') // Remove leading punctuation
-            .replace(/\s*[.,!?]\s*$/, '') // Remove trailing punctuation
-            .replace(/^(?:Output:|Output|→|\s)*/, '') // Remove Output: prefix and arrows
-            .replace(/^.*?:\s*/, '') // Remove any other prefixes with colons
-            .replace(/^.*?→\s*/, '') // Remove anything before and including →
-            .split(/\s+/).slice(0, 3).join(' ') // Keep max 3 words
-            .trim();
-
+        return suggestion;
     } catch (error) {
-        if (error.name === 'AbortError') {
-            console.log('Request cancelled');
-        } else {
-            console.error('Error in getAISuggestion:', error);
-        }
-        return null;
+        console.error('Error in getAISuggestion:', error);
+        throw error;
     }
 }
 
-// Update showSuggestion function's Gmail search handling
+// Add a style element to prevent suggestion removal
+function addPreventRemovalStyle() {
+    const styleId = 'prevent-suggestion-removal-style';
+
+    // Check if the style already exists
+    if (document.getElementById(styleId)) {
+        return;
+    }
+
+    // Create a style element
+    const style = document.createElement('style');
+    style.id = styleId;
+    style.textContent = `
+        .suggestion-span {
+            position: fixed;
+            pointer-events: none;
+            white-space: pre;
+            z-index: 999999;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            background: transparent;
+        }
+        .suggestion-text {
+            display: inline-block;
+            color: #666;
+            opacity: 0.8;
+        }
+        .tab-indicator {
+            font-size: 11px;
+            color: #999;
+            background: rgba(0, 0, 0, 0.06);
+            padding: 1px 4px;
+            border-radius: 3px;
+            margin-left: 4px;
+            font-family: system-ui, -apple-system, sans-serif;
+        }
+    `;
+
+    // Add the style to the document
+    document.head.appendChild(style);
+}
+
+// Call this function when the extension initializes
+addPreventRemovalStyle();
+
+// Completely rewrite showSuggestion with special Gmail handling
 function showSuggestion(suggestion, input) {
     if (!suggestion || !input) return;
 
     try {
+        // Remove any existing suggestion
         const existingSuggestion = document.querySelector('.suggestion-span');
         if (existingSuggestion) {
             existingSuggestion.remove();
         }
 
-        let rect;
-        let textWidth;
-        let font;
-        let lineHeight;
-
-        // Special handling for Gmail search field
-        if (window.location.hostname === 'mail.google.com' &&
-            (input.matches('[role="searchbox"]') || input.matches('[aria-label*="Search"]'))) {
-            const computedStyle = window.getComputedStyle(input);
-            rect = input.getBoundingClientRect();
-            font = computedStyle.font;
-            lineHeight = computedStyle.lineHeight;
-
-            // More accurate text measurement
-            const canvas = document.createElement('canvas');
-            const ctx = canvas.getContext('2d');
-            ctx.font = font;
-            const inputText = input.value || '';
-
-            // Get exact text measurements
-            const metrics = ctx.measureText(inputText);
-            textWidth = metrics.width;
-
-            // Adjust for Gmail search's specific layout
-            const searchIconWidth = 40;  // Increased icon width
-            const paddingLeft = 40;      // Increased padding
-            const extraSpacing = 4;      // Add small gap between text and suggestion
-
-            // Calculate total offset
-            const totalOffset = searchIconWidth + paddingLeft + textWidth + extraSpacing;
-
-            // Create suggestion with adjusted positioning
-            const suggestionSpan = document.createElement('span');
-            suggestionSpan.className = 'suggestion-span';
-
-            // Create tab indicator
-            const tabIndicator = document.createElement('span');
-            tabIndicator.className = 'tab-indicator';
-            tabIndicator.textContent = 'Tab';
-
-            // Create text span
-            const textSpan = document.createElement('span');
-            textSpan.textContent = suggestion;
-
-            // Add both elements
-            suggestionSpan.appendChild(textSpan);
-            suggestionSpan.appendChild(tabIndicator);
-
-            // Update the base styles
-            suggestionSpan.style.cssText = `
-                position: fixed;
-                left: ${rect.left + totalOffset}px;
-                top: ${rect.top}px;
-                font: ${font || 'inherit'};
-                color: #666;
-                pointer-events: none;
-                white-space: pre;
-                z-index: 999999;
-                height: ${rect.height}px;
-                display: flex;
-                align-items: center;
-                gap: 4px;
-                background: transparent;
-            `;
-
-            document.body.appendChild(suggestionSpan);
-            return;
-        }
-
-        // Handle YouTube search field
-        if (window.location.hostname === 'www.youtube.com' &&
-            (input.matches('input[name="search_query"]') ||
-                input.matches('#search') ||
-                input.matches('.ytd-searchbox'))) {
-            const computedStyle = window.getComputedStyle(input);
-            rect = input.getBoundingClientRect();
-            font = computedStyle.font;
-
-            // More accurate text measurement
-            const canvas = document.createElement('canvas');
-            const ctx = canvas.getContext('2d');
-            ctx.font = font;
-            const inputText = input.value || '';
-            textWidth = ctx.measureText(inputText).width;
-
-            // Adjust for YouTube search's layout
-            const searchIconWidth = 40;
-            const paddingLeft = parseFloat(computedStyle.paddingLeft) || 16;
-            const extraSpacing = 4;
-
-            const totalOffset = searchIconWidth + paddingLeft + textWidth + extraSpacing;
-
-            // Create suggestion with YouTube-specific styling
-            const suggestionSpan = document.createElement('span');
-            suggestionSpan.className = 'suggestion-span';
-
-            // Create tab indicator
-            const tabIndicator = document.createElement('span');
-            tabIndicator.className = 'tab-indicator';
-            tabIndicator.textContent = 'Tab';
-
-            // Create text span
-            const textSpan = document.createElement('span');
-            textSpan.textContent = suggestion;
-
-            // Add both elements
-            suggestionSpan.appendChild(textSpan);
-            suggestionSpan.appendChild(tabIndicator);
-
-            suggestionSpan.style.cssText = `
-                position: fixed;
-                left: ${rect.left + totalOffset}px;
-                top: ${rect.top}px;
-                font: ${font || 'inherit'};
-                color: #666;
-                pointer-events: none;
-                white-space: pre;
-                z-index: 999999;
-                height: ${rect.height}px;
-                display: flex;
-                align-items: center;
-                gap: 4px;
-                background: transparent;
-            `;
-
-            document.body.appendChild(suggestionSpan);
-            return;
-        }
-
-        // Handle contenteditable elements (like Gmail editor)
-        else if (input.isContentEditable || input.contentEditable === 'true') {
-            const selection = window.getSelection();
-            if (!selection.rangeCount) return;
-
-            const range = selection.getRangeAt(0);
-            const preCaretRange = range.cloneRange();
-            preCaretRange.selectNodeContents(input);
-            preCaretRange.setEnd(range.endContainer, range.endOffset);
-
-            // Get the client rect of the range
-            const rects = range.getClientRects();
-            rect = rects[rects.length - 1] || range.getBoundingClientRect();
-
-            // Get computed style from the parent element
-            const computedStyle = window.getComputedStyle(input);
-            font = computedStyle.font;
-            lineHeight = computedStyle.lineHeight;
-
-            // For contenteditable, we don't need additional text width
-            textWidth = 0;
-        }
-        // Handle regular input fields (like Google search)
-        else {
-            const computedStyle = window.getComputedStyle(input);
-            rect = input.getBoundingClientRect();
-            font = computedStyle.font;
-            lineHeight = computedStyle.lineHeight;
-            textWidth = getTextWidth(input.value || getValue(input), font);
-
-            // Adjust for padding in regular inputs
-            const paddingLeft = parseFloat(computedStyle.paddingLeft) || 0;
-            textWidth += paddingLeft;
-        }
-
+        // Create suggestion element
         const suggestionSpan = document.createElement('span');
         suggestionSpan.className = 'suggestion-span';
 
-        // Create tab indicator
+        // Create text element
+        const textSpan = document.createElement('span');
+        textSpan.className = 'suggestion-text';
+        textSpan.textContent = suggestion;
+
+        // Create Tab indicator
         const tabIndicator = document.createElement('span');
         tabIndicator.className = 'tab-indicator';
         tabIndicator.textContent = 'Tab';
 
-        // Create text span
-        const textSpan = document.createElement('span');
-        textSpan.textContent = suggestion;
-
-        // Add both elements
+        // Add elements to suggestion span
         suggestionSpan.appendChild(textSpan);
         suggestionSpan.appendChild(tabIndicator);
 
-        // Update the base styles
-        suggestionSpan.style.cssText = `
-            position: fixed;
-            left: ${rect.left + textWidth}px;
-            top: ${rect.top}px;
-            font: ${font || 'inherit'};
-            color: #666;
-            pointer-events: none;
-            white-space: pre;
-            z-index: 999999;
-            height: ${rect.height}px;
-            display: flex;
-            align-items: center;
-            gap: 4px;
-            background: transparent;
-        `;
+        // Detect Gmail
+        const isGmail = window.location.hostname.includes('mail.google.com');
 
+        // Special handling for Gmail search
+        const isGmailSearch = isGmail && (
+            input.getAttribute('placeholder')?.includes('Search') ||
+            input.getAttribute('aria-label')?.includes('Search') ||
+            input.matches('[role="searchbox"]') ||
+            input.closest('[role="search"]')
+        );
+
+        // Special handling for Gmail compose
+        const isGmailCompose = isGmail && (
+            input.getAttribute('aria-label')?.includes('Message Body') ||
+            input.closest('[role="textbox"]') ||
+            input.closest('.editable')
+        );
+
+        // Get input position and style
+        const rect = input.getBoundingClientRect();
+        const computedStyle = window.getComputedStyle(input);
+
+        // Default position calculation
+        let leftPosition, topPosition;
+
+        // Gmail search specific positioning - FINAL FIX
+        if (isGmailSearch) {
+            console.log('Gmail search detected - using final fixed positioning');
+
+            // Get the selection/cursor position
+            const selection = window.getSelection();
+            if (selection.rangeCount > 0) {
+                const range = selection.getRangeAt(0);
+                const cursorRect = range.getBoundingClientRect();
+
+                // Use cursor position directly if available
+                if (cursorRect.width > 0 || cursorRect.height > 0) {
+                    leftPosition = cursorRect.right + 1; // Minimal offset
+                    topPosition = cursorRect.top;
+
+                    console.log('Using cursor position for Gmail search:', {
+                        cursorRect,
+                        leftPosition,
+                        topPosition
+                    });
+                } else {
+                    // Fallback to a more precise calculation
+                    const searchText = input.textContent || input.value || '';
+
+                    // Create a temporary span to measure the exact text width
+                    const tempSpan = document.createElement('span');
+                    tempSpan.style.visibility = 'hidden';
+                    tempSpan.style.position = 'absolute';
+                    tempSpan.style.whiteSpace = 'pre';
+                    tempSpan.style.font = computedStyle.font;
+                    tempSpan.textContent = searchText;
+                    document.body.appendChild(tempSpan);
+
+                    // Get the exact width of the text
+                    const exactTextWidth = tempSpan.getBoundingClientRect().width;
+                    document.body.removeChild(tempSpan);
+
+                    // Calculate position - use a smaller offset (20px instead of 40px)
+                    leftPosition = rect.left + 20 + exactTextWidth;
+
+                    // Align with the text baseline
+                    topPosition = rect.top + (rect.height / 2) - (parseFloat(computedStyle.fontSize) / 3);
+
+                    console.log('Using text measurement for Gmail search:', {
+                        searchText,
+                        exactTextWidth,
+                        leftPosition,
+                        topPosition
+                    });
+                }
+            } else {
+                // Fallback if no selection
+                leftPosition = rect.left + rect.width / 2;
+                topPosition = rect.top + rect.height / 2;
+            }
+        }
+        // Gmail compose specific positioning - FINAL FIX
+        else if (isGmailCompose) {
+            console.log('Gmail compose detected - using final fixed positioning');
+
+            // For Gmail compose, we need to get the exact cursor position
+            const selection = window.getSelection();
+            if (selection.rangeCount > 0) {
+                const range = selection.getRangeAt(0);
+                const cursorRect = range.getBoundingClientRect();
+
+                // Use cursor position with minimal adjustments
+                leftPosition = cursorRect.right + 1; // Minimal offset
+
+                // Use the exact top position from the cursor
+                topPosition = cursorRect.top;
+
+                console.log('Gmail compose positioning:', {
+                    cursorRect,
+                    leftPosition,
+                    topPosition
+                });
+            } else {
+                // Fallback if no selection
+                leftPosition = rect.left + rect.width / 2;
+                topPosition = rect.top + rect.height / 2;
+            }
+        }
+        // Default positioning for other inputs
+        else {
+            // Get current text value
+            const inputValue = getValue(input);
+
+            // Measure text width
+            const canvas = document.createElement('canvas');
+            const context = canvas.getContext('2d');
+            context.font = computedStyle.font;
+            const textWidth = context.measureText(inputValue).width;
+
+            leftPosition = rect.left + parseFloat(computedStyle.paddingLeft || 0) + textWidth;
+            topPosition = rect.top + parseFloat(computedStyle.paddingTop || 0);
+        }
+
+        // Set position
+        suggestionSpan.style.left = `${leftPosition}px`;
+        suggestionSpan.style.top = `${topPosition}px`;
+
+        // Match font styles
+        suggestionSpan.style.fontFamily = computedStyle.fontFamily;
+        suggestionSpan.style.fontSize = computedStyle.fontSize;
+        suggestionSpan.style.lineHeight = computedStyle.lineHeight;
+
+        // Add to document
         document.body.appendChild(suggestionSpan);
+
+        console.log('Suggestion displayed at:', { leftPosition, topPosition });
+
+        return true;
     } catch (error) {
         console.error('Error showing suggestion:', error);
+        return false;
     }
 }
 
